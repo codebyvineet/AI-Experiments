@@ -169,20 +169,20 @@ class LogContext:
         self._log(logging.ERROR, msg, data, **kwargs)
     
     def ai_request(self, prompt: str, model: str = "gemini"):
-        """Log AI request."""
-        self.info(f"🤖 AI Request to {model}", data={"prompt_preview": prompt[:200] + "..." if len(prompt) > 200 else prompt})
+        """Log AI request - full prompt without truncation."""
+        self.info(f"🤖 AI Request to {model}", data={"prompt": prompt})
     
     def ai_response(self, response: str, duration_ms: int):
-        """Log AI response."""
-        self.info(f"✅ AI Response received", data={"response_preview": response[:200] + "..." if len(response) > 200 else response}, duration_ms=duration_ms)
+        """Log AI response - full response without truncation."""
+        self.info(f"✅ AI Response received", data={"response": response}, duration_ms=duration_ms)
     
     def agent_start(self, agent_name: str, task: str):
         """Log agent starting."""
         self.info(f"🚀 Agent '{agent_name}' starting", data={"task": task})
     
     def agent_complete(self, agent_name: str, result: Any, duration_ms: int):
-        """Log agent completion."""
-        self.info(f"✅ Agent '{agent_name}' completed", data={"result_preview": str(result)[:200]}, duration_ms=duration_ms)
+        """Log agent completion - full result without truncation."""
+        self.info(f"✅ Agent '{agent_name}' completed", data={"result": str(result)}, duration_ms=duration_ms)
     
     def step_start(self, step_num: int, description: str, mode: str):
         """Log step starting."""
