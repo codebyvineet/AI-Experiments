@@ -372,12 +372,12 @@ class MultiAgentOrchestrator:
             # Execute based on mode using real AI
             task_results = []
             if step.get("execution_mode") == "parallel":
-                async for update in self._execute_parallel_tasks_ai(step, session_id, session.goal):
+                async for update in self._execute_parallel_tasks_ai(step, session_id, session.goal, session):
                     if update.get("type") == "task_complete" and "result" in update:
                         task_results.append(update.get("result", {}))
                     yield update
             else:
-                async for update in self._execute_sequential_tasks_ai(step, session_id, session.goal):
+                async for update in self._execute_sequential_tasks_ai(step, session_id, session.goal, session):
                     if update.get("type") == "task_complete" and "result" in update:
                         task_results.append(update.get("result", {}))
                     yield update
@@ -437,7 +437,8 @@ class MultiAgentOrchestrator:
         self, 
         step: Dict[str, Any],
         session_id: str,
-        goal: str
+        goal: str,
+        session: MultiAgentSession
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Execute sub-tasks in parallel using real AI."""
         log = LogContext(logger, session_id=session_id, phase=step.get("phase", "unknown"))
@@ -519,7 +520,8 @@ class MultiAgentOrchestrator:
         self, 
         step: Dict[str, Any],
         session_id: str,
-        goal: str
+        goal: str,
+        session: MultiAgentSession
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Execute sub-tasks sequentially using real AI."""
         log = LogContext(logger, session_id=session_id, phase=step.get("phase", "unknown"))
