@@ -19,10 +19,10 @@ langchain-openai==0.0.5
 python-jose[cryptography]==3.4.0
 passlib[bcrypt]==1.7.4
 
-# MCP Server
-mcp==1.0.0
+# MCP Server (updated for security - fixes DNS rebinding, DoS vulnerabilities)
+mcp==1.23.0
 
 # Utilities
 python-dotenv==1.0.1
 httpx==0.26.0
-python-multipart==0.0.9
+python-multipart==0.0.22
