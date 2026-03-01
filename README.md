@@ -44,7 +44,13 @@ cd AI-Experiments
 cp .env.example .env
 ```
 
-3. Update the `.env` file with your settings (especially `JWT_SECRET_KEY`)
+3. Generate a secure JWT secret and update `.env`:
+```bash
+# Generate a secure secret key
+python -c 'import secrets; print(secrets.token_urlsafe(32))'
+
+# Update the JWT_SECRET_KEY in .env with the generated value
+```
 
 4. Start the application:
 ```bash
@@ -152,7 +158,7 @@ curl -X POST http://localhost:8000/auth/token/generate \
 | `MONGODB_DATABASE` | MongoDB database name | `mcp_demo` |
 | `REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
 | `REDIS_DB` | Redis database number | `0` |
-| `JWT_SECRET_KEY` | JWT signing secret | (required) |
+| `JWT_SECRET_KEY` | JWT signing secret (min 32 chars) | (required) |
 | `JWT_ALGORITHM` | JWT algorithm | `HS256` |
 | `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | Token expiration | `30` |
 | `OPENAI_API_KEY` | OpenAI API key (optional) | - |

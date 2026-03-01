@@ -10,7 +10,7 @@ services:
       - MONGODB_DATABASE=mcp_demo
       - REDIS_URL=redis://redis:6379
       - REDIS_DB=0
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-super-secret-jwt-key-change-in-production}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
       - JWT_ALGORITHM=HS256
       - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}

@@ -1,7 +1,7 @@
 """CRUD operations for users and items."""
 
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 from bson import ObjectId
 
 from app.checkpoints import mongodb_checkpoint
@@ -32,13 +32,14 @@ class UserCRUD:
             "hashed_password": get_password_hash(user_data.password),
             "role": user_data.role.value,
             "is_active": True,
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc)
         }
         
         result = await db.users.insert_one(user_dict)
         user_dict["id"] = str(result.inserted_id)
-        del user_dict["_id"] if "_id" in user_dict else None
+        if "_id" in user_dict:
+            del user_dict["_id"]
         
         return User(**user_dict)
     
@@ -82,7 +83,7 @@ class UserCRUD:
     async def update_user(self, user_id: str, updates: dict) -> Optional[User]:
         """Update a user."""
         db = mongodb_checkpoint.db
-        updates["updated_at"] = datetime.utcnow()
+        updates["updated_at"] = datetime.now(timezone.utc)
         
         await db.users.update_one(
             {"_id": ObjectId(user_id)},
@@ -109,8 +110,8 @@ class ItemCRUD:
             "description": item_data.description,
             "data": item_data.data,
             "owner_id": owner_id,
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc)
         }
         
         result = await db.items.insert_one(item_dict)
@@ -165,7 +166,7 @@ class ItemCRUD:
             return None
         
         updates = item_data.model_dump(exclude_none=True)
-        updates["updated_at"] = datetime.utcnow()
+        updates["updated_at"] = datetime.now(timezone.utc)
         
         await db.items.update_one(
             {"_id": ObjectId(item_id)},

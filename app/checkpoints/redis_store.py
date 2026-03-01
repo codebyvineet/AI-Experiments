@@ -2,7 +2,7 @@
 
 import json
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timezone
 import redis.asyncio as redis
 
 from app.config import get_settings
@@ -36,7 +36,7 @@ class RedisCheckpoint:
         """Save agent state as cold checkpoint (Redis storage)."""
         state_dict = state.model_dump(mode="json")
         state_dict["state_type"] = "cold"
-        state_dict["updated_at"] = datetime.utcnow().isoformat()
+        state_dict["updated_at"] = datetime.now(timezone.utc).isoformat()
         
         key = f"{self.cold_checkpoint_prefix}{state.session_id}"
         await self.client.setex(

@@ -1,7 +1,7 @@
 """MongoDB hot state checkpoint storage."""
 
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timezone
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from bson import ObjectId
 
@@ -38,7 +38,7 @@ class MongoDBCheckpoint:
     async def save_checkpoint(self, state: AgentState) -> str:
         """Save agent state checkpoint (hot storage)."""
         state_dict = state.model_dump(exclude={"id"})
-        state_dict["updated_at"] = datetime.utcnow()
+        state_dict["updated_at"] = datetime.now(timezone.utc)
         
         result = await self.db.checkpoints.update_one(
             {"session_id": state.session_id},

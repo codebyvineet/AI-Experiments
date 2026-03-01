@@ -1,7 +1,7 @@
 """MCP Server implementation with RBAC support."""
 
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 from app.auth import authorization_tool, decode_token, ROLE_PERMISSIONS
@@ -246,7 +246,7 @@ class MCPServer:
             "tool": tool_name,
             "arguments": arguments,
             "executed_by": access["username"],
-            "executed_at": datetime.utcnow().isoformat(),
+            "executed_at": datetime.now(timezone.utc).isoformat(),
             "status": "success"
         })
     
@@ -281,7 +281,7 @@ class MCPServer:
             "resource": resource["name"],
             "uri": resource_uri,
             "accessed_by": access["username"],
-            "accessed_at": datetime.utcnow().isoformat()
+            "accessed_at": datetime.now(timezone.utc).isoformat()
         })
     
     def handle_request(self, request: MCPRequest, token: str) -> MCPResponse:

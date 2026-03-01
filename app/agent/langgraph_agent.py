@@ -2,7 +2,7 @@
 
 import uuid
 from typing import Dict, Any, List, Optional, TypedDict, Annotated
-from datetime import datetime
+from datetime import datetime, timezone
 from operator import add
 
 from app.checkpoints import mongodb_checkpoint, redis_checkpoint
@@ -228,7 +228,7 @@ class PlanModeAgent:
         message = {
             "role": role,
             "content": content,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
         messages = state.state_data.get("messages", [])

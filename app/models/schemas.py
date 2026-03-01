@@ -1,9 +1,14 @@
 """Data models for the application."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 from enum import Enum
+
+
+def utcnow() -> datetime:
+    """Return timezone-aware UTC datetime."""
+    return datetime.now(timezone.utc)
 
 
 class UserRole(str, Enum):
@@ -21,8 +26,8 @@ class User(BaseModel):
     hashed_password: str
     role: UserRole = UserRole.USER
     is_active: bool = True
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class UserCreate(BaseModel):
@@ -65,8 +70,8 @@ class Item(BaseModel):
     description: Optional[str] = None
     data: Dict[str, Any] = Field(default_factory=dict)
     owner_id: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class ItemCreate(BaseModel):
@@ -93,8 +98,8 @@ class AgentState(BaseModel):
     plan: Optional[List[Dict[str, Any]]] = None
     current_step: int = 0
     is_complete: bool = False
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class MCPRequest(BaseModel):
