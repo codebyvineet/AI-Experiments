@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.config.logging_config import setup_logging, get_logger, LogContext
 from app.checkpoints import mongodb_checkpoint, redis_checkpoint
 from app.api import auth_router, items_router, agent_router, mcp_router, streaming_router
+from app.api.reports_routes import router as reports_router
 from app.agent.ai_service import ai_service
 
 # Initialize logging
@@ -127,6 +128,7 @@ app.include_router(items_router)
 app.include_router(agent_router)
 app.include_router(mcp_router)
 app.include_router(streaming_router)
+app.include_router(reports_router)
 
 
 @app.get("/")

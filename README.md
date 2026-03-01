@@ -32,19 +32,35 @@ A containerized Python application demonstrating MCP Server, LangGraph multi-age
 │                   React Frontend (Port 3000)                 │
 ├─────────────────────────────────────────────────────────────┤
 │  Dashboard  │  AI Agent  │  MCP Server  │  Items CRUD       │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 Backend API Server (Port 8000)               │
 ├─────────────────────────────────────────────────────────────┤
-│                    FastAPI Backend (Port 8000)               │
-├─────────────────────────────────────────────────────────────┤
-│  Auth API  │  Items API  │  Streaming API  │  MCP API       │
+│  Auth API  │  Items API  │  Streaming API  │  Reports API   │
 ├─────────────────────────────────────────────────────────────┤
 │                  Authorization Layer (RBAC)                  │
 ├─────────────────────────────────────────────────────────────┤
-│    Multi-Agent Orchestrator    │       MCP Server           │
-│  (Parallel/Sequential Modes)   │    (Tools & Resources)     │
+│    Multi-Agent Orchestrator    │       MCP Client           │
+│  (Parallel/Sequential Modes)   │  (JSON-RPC over HTTP)      │
 ├─────────────────────────────────────────────────────────────┤
 │              Google Vertex AI (Gemini 2.5 Pro)               │
 ├─────────────────────────────────────────────────────────────┤
 │    MongoDB (Hot State)    │    Redis (Cold State)           │
+└─────────────────────────────────────────────────────────────┘
+                              ▲
+                              │ HTTP with Bearer Token
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│              MCP Server (Port 8001) - Separate Container     │
+├─────────────────────────────────────────────────────────────┤
+│  Transport Layer: GET /sse, POST /message                   │
+│  Data Layer: JSON-RPC 2.0 (tools/list, tools/call)         │
+├─────────────────────────────────────────────────────────────┤
+│  Tools: create_item, read_item, update_item, delete_item,  │
+│         list_items, search_items, bulk_create, bulk_delete, │
+│         get_statistics, generate_report, get_user_profile   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -96,12 +112,20 @@ GOOGLE_CLOUD_PROJECT=your-actual-project-id
 ### Step 3: Start Backend Services
 
 ```bash
-# Start all backend services (FastAPI, MongoDB, Redis)
+# Start all backend services (FastAPI, MCP Server, MongoDB, Redis)
 docker-compose up -d
 
-# Verify services are running
+# Verify all services are running
+docker-compose ps
+# Should show: app, mcp-server, mongodb, redis all running
+
+# Check backend health
 curl http://localhost:8000/health
 # Expected: {"status":"healthy","mongodb":"connected","redis":"connected"}
+
+# Check MCP server health  
+curl http://localhost:8001/health
+# Expected: {"status":"healthy","server":"AI-Experiments MCP Server"...}
 
 # Check logs to verify AI is initialized
 docker-compose logs app | grep -E "(✅|🤖)"
@@ -314,16 +338,22 @@ See full API documentation at **http://localhost:8000/docs**
 
 ## MCP Tools
 
-The AI agent is aware of these tools and will use them in plans:
+The MCP Server (port 8001) provides the following tools. The AI agent communicates with MCP via JSON-RPC:
 
-| Tool | Description | Permission |
+| Tool | Description | Parameters |
 |------|-------------|------------|
-| `create_item` | Create a new item | items:write |
-| `read_item` | Read an item by ID | items:read |
-| `update_item` | Update an existing item | items:write |
-| `delete_item` | Delete an item | items:delete |
-| `execute_agent` | Execute an AI agent task | agent:execute |
-| `manage_users` | Manage users (admin only) | users:write |
+| `create_item` | Create a new item | name (required), description, data |
+| `read_item` | Read an item by ID | item_id (required) |
+| `update_item` | Update an existing item | item_id (required), name, description, data |
+| `delete_item` | Delete an item | item_id (required) |
+| `list_items` | List items with pagination | skip, limit |
+| `search_items` | Search items by text | query (required), field, limit, offset |
+| `bulk_create` | Create multiple items | items (array) |
+| `bulk_delete` | Delete multiple items | item_ids (array) |
+| `get_statistics` | Get database statistics | none |
+| `generate_report` | Generate a report | report_type, filters |
+| `get_user_profile` | Get current user profile | none |
+| `update_user_profile` | Update user profile | display_name, email, preferences |
 
 ## Checkpoint Storage
 

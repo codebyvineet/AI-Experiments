@@ -182,6 +182,153 @@ class ItemCRUD:
             "owner_id": owner_id
         })
         return result.deleted_count > 0
+    
+    async def search_items(
+        self,
+        query: str,
+        field: str = "all",
+        limit: int = 20,
+        offset: int = 0
+    ) -> List[Item]:
+        """Search items by text query.
+        
+        Args:
+            query: Search text
+            field: Field to search (all, name, description, data)
+            limit: Maximum results
+            offset: Skip results
+        """
+        db = mongodb_checkpoint.db
+        
+        # Build search filter
+        regex_query = {"$regex": query, "$options": "i"}
+        
+        if field == "name":
+            search_filter = {"name": regex_query}
+        elif field == "description":
+            search_filter = {"description": regex_query}
+        elif field == "data":
+            # Search in JSON data (convert to string for regex)
+            search_filter = {"$where": f"JSON.stringify(this.data).match(/{query}/i)"}
+        else:  # all
+            search_filter = {
+                "$or": [
+                    {"name": regex_query},
+                    {"description": regex_query}
+                ]
+            }
+        
+        cursor = db.items.find(search_filter).skip(offset).limit(limit)
+        items = []
+        async for doc in cursor:
+            doc["id"] = str(doc.pop("_id"))
+            items.append(Item(**doc))
+        return items
+    
+    async def get_statistics(self, user_id: str) -> dict:
+        """Get statistics about items.
+        
+        Args:
+            user_id: Current user ID for personalized stats
+        """
+        db = mongodb_checkpoint.db
+        
+        # Total count
+        total_count = await db.items.count_documents({})
+        
+        # User's items count
+        user_count = await db.items.count_documents({"owner_id": user_id})
+        
+        # Recent items (last 7 days)
+        from datetime import timedelta
+        seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        recent_count = await db.items.count_documents({
+            "created_at": {"$gte": seven_days_ago}
+        })
+        
+        # Most recent item
+        latest = await db.items.find_one(
+            {},
+            sort=[("created_at", -1)]
+        )
+        
+        return {
+            "total_items": total_count,
+            "user_items": user_count,
+            "recent_items_7d": recent_count,
+            "latest_item": {
+                "id": str(latest["_id"]) if latest else None,
+                "name": latest.get("name") if latest else None,
+                "created_at": latest.get("created_at").isoformat() if latest and latest.get("created_at") else None
+            } if latest else None
+        }
+    
+    async def bulk_create(self, items: List[ItemCreate], owner_id: str) -> List[Item]:
+        """Create multiple items at once.
+        
+        Args:
+            items: List of items to create
+            owner_id: Owner user ID
+        """
+        db = mongodb_checkpoint.db
+        
+        if not items:
+            return []
+        
+        now = datetime.now(timezone.utc)
+        item_dicts = []
+        for item_data in items:
+            item_dicts.append({
+                "name": item_data.name,
+                "description": item_data.description,
+                "data": item_data.data,
+                "owner_id": owner_id,
+                "created_at": now,
+                "updated_at": now
+            })
+        
+        result = await db.items.insert_many(item_dicts)
+        
+        # Fetch created items
+        created_items = []
+        for i, inserted_id in enumerate(result.inserted_ids):
+            item_dicts[i]["id"] = str(inserted_id)
+            created_items.append(Item(**item_dicts[i]))
+        
+        return created_items
+    
+    async def bulk_delete(self, item_ids: List[str], owner_id: str) -> int:
+        """Delete multiple items at once.
+        
+        Args:
+            item_ids: List of item IDs to delete
+            owner_id: Owner user ID (for authorization)
+            
+        Returns:
+            Number of items deleted
+        """
+        db = mongodb_checkpoint.db
+        
+        if not item_ids:
+            return 0
+        
+        # Convert to ObjectIds
+        object_ids = []
+        for item_id in item_ids:
+            try:
+                object_ids.append(ObjectId(item_id))
+            except Exception:
+                continue  # Skip invalid IDs
+        
+        if not object_ids:
+            return 0
+        
+        result = await db.items.delete_many({
+            "_id": {"$in": object_ids},
+            "owner_id": owner_id
+        })
+        
+        return result.deleted_count
 
 
 # Global instances

@@ -11,7 +11,7 @@ from google.oauth2 import service_account
 
 from app.config.settings import get_settings
 from app.config.logging_config import get_logger, LogContext
-from app.mcp.server import mcp_server
+from app.mcp.client import mcp_client, get_mcp_tools_description
 
 logger = get_logger("ai_service")
 
@@ -21,86 +21,70 @@ def get_system_tools_description() -> str:
     return """
 ## Available MCP Tools (Model Context Protocol)
 
-You have access to the following tools via the MCP Server. Use these in your plans:
+You have access to the following tools via the MCP Server. Use these tools in your plans.
+All operations go through the MCP Server which handles authorization.
 
 ### Item Management Tools
 1. **create_item** - Create a new item in the database
    - Parameters: name (string, required), description (string), data (object)
-   - Permission: items:write
    
 2. **read_item** - Read/retrieve an item from the database
    - Parameters: item_id (string, required)
-   - Permission: items:read
 
 3. **update_item** - Update an existing item
-   - Parameters: item_id (string, required), updates (object, required)
-   - Permission: items:write
+   - Parameters: item_id (string, required), name (string), description (string), data (object)
 
 4. **delete_item** - Delete an item from the database
    - Parameters: item_id (string, required)
-   - Permission: items:delete
 
-### Agent Tools
-5. **execute_agent** - Execute an AI agent task
-   - Parameters: session_id (string, required), action (string, required)
-   - Permission: agent:execute
+5. **list_items** - List all items with pagination
+   - Parameters: skip (integer, default 0), limit (integer, default 100)
 
-### User Management Tools (Admin only)
-6. **manage_users** - Manage system users
-   - Parameters: action (string, required), user_data (object)
-   - Permission: users:write
+### Search Tools
+6. **search_items** - Search items by text query
+   - Parameters: query (string, required), field (string: all|name|description|data), limit, offset
 
-## Available Resources
-- **items** (mcp://items) - Collection of all items in the system
-- **users** (mcp://users) - User management resource
-- **agent_sessions** (mcp://agent/sessions) - AI agent session data
+### Batch Operation Tools
+7. **bulk_create** - Create multiple items at once
+   - Parameters: items (array of {name, description, data})
+
+8. **bulk_delete** - Delete multiple items by IDs
+   - Parameters: item_ids (array of strings)
+
+### Statistics & Report Tools
+9. **get_statistics** - Get database statistics
+   - Parameters: none
+
+10. **generate_report** - Generate a report
+    - Parameters: report_type (summary|detailed|activity), filters (object)
+
+### User Tools
+11. **get_user_profile** - Get current user's profile
+    - Parameters: none
+
+12. **update_user_profile** - Update user profile
+    - Parameters: display_name, email, preferences
 
 ## System Capabilities
-- MongoDB for hot state storage (active sessions, items, users)
-- Redis for cold state storage (archived checkpoints, cache)
-- JWT-based authentication with role-based access control
-- Real-time streaming via Server-Sent Events (SSE)
-
-## User Roles & Permissions
-- **admin**: Full access to all tools and resources
-- **user**: Can read/write/delete items, execute agents, read/write MCP
-- **read_only**: Can only read items and MCP resources
+- MCP Server handles all tool execution with proper authorization
+- MongoDB for data storage
+- Redis for caching
+- JWT-based authentication
+- Real-time streaming via SSE
 """
 
 
-def get_api_endpoints_description() -> str:
-    """Get a description of available API endpoints."""
-    return """
-## Available REST API Endpoints
-
-### Authentication (/auth)
-- POST /auth/register - Register new user
-- POST /auth/login - Login and get JWT token
-- GET /auth/me - Get current user info
-- POST /auth/token/internal - Generate internal API token
-
-### Items CRUD (/items)
-- GET /items/ - List all items
-- POST /items/ - Create new item
-- GET /items/{id} - Get specific item
-- PUT /items/{id} - Update item
-- DELETE /items/{id} - Delete item
-
-### Agent Operations (/agent)
-- POST /agent/sessions - Create agent session
-- GET /agent/sessions - List sessions
-- POST /agent/sessions/{id}/execute - Execute session
-
-### MCP Server (/mcp)
-- GET /mcp/tools - List available MCP tools
-- POST /mcp/call/{tool_name} - Call an MCP tool
-- GET /mcp/resources - List available resources
-
-### Streaming (/stream)
-- POST /stream/sessions - Create streaming session
-- GET /stream/sessions/{id}/plan - Stream plan generation
-- GET /stream/sessions/{id}/execute - Stream plan execution
-"""
+async def get_dynamic_tools_description() -> str:
+    """Get dynamic tools description from MCP server.
+    
+    This fetches the actual tools available from the external MCP server.
+    Falls back to static description if MCP server is unavailable.
+    """
+    try:
+        return await get_mcp_tools_description()
+    except Exception as e:
+        logger.warning(f"Could not fetch MCP tools, using static description: {e}")
+        return get_system_tools_description()
 
 
 class AIService:
@@ -167,9 +151,8 @@ class AIService:
         log.info(f"📋 Generating plan for goal: {goal}")
         log.info(f"🔧 User permissions: {user_permissions or 'not specified'}")
         
-        # Get system context (tools, APIs, capabilities)
+        # Get system context (MCP tools only - no direct API knowledge)
         system_tools = get_system_tools_description()
-        api_endpoints = get_api_endpoints_description()
         
         # Filter tools based on user permissions if provided
         permission_context = ""
@@ -178,20 +161,16 @@ class AIService:
 ## Your Available Permissions
 You have the following permissions: {', '.join(user_permissions)}
 
-Only use tools and resources that match your permissions. For example:
-- items:read allows read_item and listing items
-- items:write allows create_item and update_item
-- items:delete allows delete_item
-- agent:execute allows execute_agent
-- mcp:read/write allows MCP operations
+Only use tools that match your permissions. For example:
+- items:read allows read_item, list_items, search_items
+- items:write allows create_item, update_item, bulk_create
+- items:delete allows delete_item, bulk_delete
 """
         
-        # Build the planning prompt with full system context
+        # Build the planning prompt with MCP tools only
         prompt = f"""You are a planning agent for an AI-powered system. Create a detailed execution plan for the following goal.
 
 {system_tools}
-
-{api_endpoints}
 
 {permission_context}
 
@@ -203,11 +182,11 @@ GOAL: {goal}
 
 {"CONTEXT: " + json.dumps(context) if context else ""}
 
-Create a JSON plan that uses the ACTUAL tools and APIs available in this system. The plan should reference specific MCP tools (like create_item, read_item, etc.) and API endpoints where appropriate.
+Create a JSON plan that uses the MCP tools available in this system. The plan should reference specific MCP tools (like create_item, read_item, list_items, search_items, etc.).
 
 Response format:
 {{
-    "analysis": "Brief analysis of the goal and which tools/APIs will be needed",
+    "analysis": "Brief analysis of the goal and which MCP tools will be needed",
     "steps": [
         {{
             "phase": "research|analysis|execution|data_operations|validation",
@@ -218,7 +197,7 @@ Response format:
                 {{
                     "name": "Task name",
                     "description": "Task details",
-                    "tool": "MCP tool name or API endpoint to use (if applicable)",
+                    "tool": "MCP tool name to use (if applicable)",
                     "tool_params": {{}}  // Parameters for the tool if applicable
                 }}
             ],
@@ -227,19 +206,18 @@ Response format:
         }}
     ],
     "mcp_tools_summary": ["all MCP tools that will be used across the plan"],
-    "api_endpoints_summary": ["all API endpoints that will be called"],
     "estimated_complexity": "low|medium|high",
     "potential_challenges": ["challenge1", "challenge2"]
 }}
 
 Important rules:
-1. Reference ACTUAL tools from the system (create_item, read_item, update_item, delete_item, etc.)
+1. ONLY use MCP tools (create_item, read_item, update_item, delete_item, list_items, search_items, bulk_create, bulk_delete, get_statistics, generate_report, get_user_profile)
 2. Research tasks can run in parallel when they don't depend on each other
 3. Data operations that modify the database should be sequential
 4. Validation should always be the final step
 5. Include 3-6 steps depending on complexity
 6. Each step should have 2-4 sub-tasks
-7. Be specific about which MCP tools or API endpoints each task will use
+7. Be specific about which MCP tools each task will use
 
 Respond ONLY with valid JSON, no markdown or explanation.
 """
@@ -324,7 +302,7 @@ Respond ONLY with valid JSON, no markdown or explanation.
         step_info: Dict[str, Any],
         token: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Execute a single task, directly calling MCP tools when specified."""
+        """Execute a single task, calling MCP tools via the external MCP Server."""
         log = LogContext(
             logger, 
             session_id=session_id, 
@@ -342,32 +320,51 @@ Respond ONLY with valid JSON, no markdown or explanation.
         task_tool = context.get("tool") or step_info.get("tool")
         task_tool_params = context.get("tool_params") or step_info.get("tool_params", {})
         
-        # If a specific MCP tool is specified AND we have a token, execute it directly
-        if task_tool and token and task_tool in ["create_item", "read_item", "update_item", "delete_item", "list_items"]:
-            log.info(f"🔧 Directly executing MCP tool: {task_tool}", data={"params": task_tool_params})
+        # List of all available MCP tools
+        available_mcp_tools = [
+            "create_item", "read_item", "update_item", "delete_item", "list_items",
+            "search_items", "bulk_create", "bulk_delete", 
+            "get_statistics", "generate_report",
+            "get_user_profile", "update_user_profile"
+        ]
+        
+        # If a specific MCP tool is specified AND we have a token, execute via MCP client
+        if task_tool and token and task_tool in available_mcp_tools:
+            log.info(f"🔧 Executing MCP tool via MCP Server: {task_tool}", data={"params": task_tool_params})
             
             try:
-                mcp_result = await mcp_server.call_tool(token, task_tool, task_tool_params)
+                # Call tool via MCP client (external MCP server)
+                mcp_result = await mcp_client.call_tool(task_tool, task_tool_params, token)
                 duration_ms = int((time.time() - start_time) * 1000)
                 
-                if mcp_result.error:
-                    log.error(f"❌ MCP tool {task_tool} failed: {mcp_result.error}")
+                # Check if result indicates error
+                if isinstance(mcp_result, dict) and mcp_result.get("error"):
+                    log.error(f"❌ MCP tool {task_tool} failed: {mcp_result.get('error')}")
                     return {
                         "task_name": task_name,
                         "status": "failed",
-                        "result": f"MCP tool error: {mcp_result.error.get('message', 'Unknown error')}",
-                        "output_data": {"error": mcp_result.error},
+                        "result": f"MCP tool error: {mcp_result.get('error')}",
+                        "output_data": {"error": mcp_result.get("error")},
                         "duration_ms": duration_ms
                     }
                 
-                log.info(f"✅ MCP tool {task_tool} succeeded", data={"result": mcp_result.result})
+                log.info(f"✅ MCP tool {task_tool} succeeded", data={"result": str(mcp_result)[:200]})
                 return {
                     "task_name": task_name,
                     "status": "success",
                     "result": f"Successfully executed {task_tool}",
-                    "output_data": mcp_result.result or {},
+                    "output_data": mcp_result if isinstance(mcp_result, dict) else {"result": mcp_result},
                     "mcp_tool_executed": task_tool,
                     "notes": "",
+                    "duration_ms": duration_ms
+                }
+            except PermissionError as e:
+                duration_ms = int((time.time() - start_time) * 1000)
+                log.error(f"❌ MCP authorization error: {e}")
+                return {
+                    "task_name": task_name,
+                    "status": "failed",
+                    "result": f"Authorization error: {str(e)}",
                     "duration_ms": duration_ms
                 }
             except Exception as e:

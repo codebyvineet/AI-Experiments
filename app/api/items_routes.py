@@ -1,13 +1,25 @@
 """CRUD API routes for items."""
 
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, status, Depends
+from pydantic import BaseModel
 
 from app.auth import get_current_user, require_permission
 from app.crud import item_crud
 from app.models import Item, ItemCreate, ItemUpdate, TokenData
 
 router = APIRouter(prefix="/items", tags=["items"])
+
+
+# Request models for batch operations
+class BulkCreateRequest(BaseModel):
+    """Request model for bulk item creation."""
+    items: List[ItemCreate]
+
+
+class BulkDeleteRequest(BaseModel):
+    """Request model for bulk item deletion."""
+    item_ids: List[str]
 
 
 @router.post("/", response_model=Item)
@@ -31,6 +43,61 @@ async def list_items(
     owner_id = current_user.user_id if my_items_only else None
     items = await item_crud.list_items(owner_id=owner_id, skip=skip, limit=limit)
     return items
+
+
+@router.get("/search", response_model=List[Item])
+async def search_items(
+    q: str,
+    field: str = "all",
+    limit: int = 20,
+    offset: int = 0,
+    current_user: TokenData = Depends(require_permission("items:read"))
+):
+    """Search items by text query.
+    
+    Args:
+        q: Search query text
+        field: Field to search in (all, name, description, data)
+        limit: Maximum number of results
+        offset: Number of results to skip
+    """
+    results = await item_crud.search_items(q, field, limit, offset)
+    return results
+
+
+@router.get("/stats")
+async def get_statistics(
+    current_user: TokenData = Depends(require_permission("items:read"))
+) -> Dict[str, Any]:
+    """Get statistics about items in the database."""
+    stats = await item_crud.get_statistics(current_user.user_id)
+    return stats
+
+
+@router.post("/batch/create")
+async def bulk_create(
+    request: BulkCreateRequest,
+    current_user: TokenData = Depends(require_permission("items:write"))
+) -> Dict[str, Any]:
+    """Create multiple items in a single operation."""
+    created_items = await item_crud.bulk_create(request.items, current_user.user_id)
+    return {
+        "created": len(created_items),
+        "items": created_items
+    }
+
+
+@router.post("/batch/delete")
+async def bulk_delete(
+    request: BulkDeleteRequest,
+    current_user: TokenData = Depends(require_permission("items:delete"))
+) -> Dict[str, Any]:
+    """Delete multiple items in a single operation."""
+    deleted_count = await item_crud.bulk_delete(request.item_ids, current_user.user_id)
+    return {
+        "deleted": deleted_count,
+        "requested": len(request.item_ids)
+    }
 
 
 @router.get("/{item_id}", response_model=Item)
