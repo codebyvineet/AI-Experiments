@@ -1,11 +1,12 @@
 # AI-Experiments
 
-A containerized Python application demonstrating MCP Server, LangGraph agent with plan mode, and JWT-based RBAC authentication.
+A containerized Python application demonstrating MCP Server, LangGraph agent with plan mode, and JWT-based RBAC authentication. Powered by **Google Vertex AI with Gemini 2.5**.
 
 ## Features
 
 - **MCP Server**: Model Context Protocol server with tools and resources
 - **LangGraph Agent**: Agentic system with plan mode for multi-step task execution
+- **Google Vertex AI**: Gemini 2.5 model integration for AI capabilities
 - **Hot State Checkpoints**: MongoDB storage for active agent sessions
 - **Cold State Checkpoints**: Redis storage for archived/inactive sessions
 - **CRUD Operations**: Full create, read, update, delete operations for items
@@ -25,11 +26,35 @@ A containerized Python application demonstrating MCP Server, LangGraph agent wit
 │         LangGraph Agent         │       MCP Server          │
 │       (Plan Mode Support)       │    (Tools & Resources)    │
 ├─────────────────────────────────────────────────────────────┤
+│              Google Vertex AI (Gemini 2.5)                   │
+├─────────────────────────────────────────────────────────────┤
 │    MongoDB (Hot State)    │    Redis (Cold State)           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## Quick Start
+
+### Prerequisites
+
+1. **Google Cloud Project** with Vertex AI API enabled
+2. **Service Account** with Vertex AI permissions
+3. **Docker** and **Docker Compose** installed
+
+### Setting Up Google Cloud Credentials
+
+1. Create a service account in Google Cloud Console
+2. Grant the service account the following roles:
+   - `Vertex AI User` (roles/aiplatform.user)
+   - `Vertex AI Service Agent` (roles/aiplatform.serviceAgent) 
+3. Download the service account JSON key file
+4. Create a `credentials` directory in the project root:
+   ```bash
+   mkdir credentials
+   ```
+5. Place your service account JSON file in the credentials directory:
+   ```bash
+   mv /path/to/your-service-account.json credentials/service-account.json
+   ```
 
 ### Using Docker Compose
 
@@ -44,20 +69,25 @@ cd AI-Experiments
 cp .env.example .env
 ```
 
-3. Generate a secure JWT secret and update `.env`:
+3. Configure the `.env` file:
 ```bash
-# Generate a secure secret key
+# Generate a secure JWT secret key
 python -c 'import secrets; print(secrets.token_urlsafe(32))'
 
-# Update the JWT_SECRET_KEY in .env with the generated value
+# Update .env with your values:
+# - JWT_SECRET_KEY: paste the generated key
+# - GOOGLE_CLOUD_PROJECT: your GCP project ID
+# - GOOGLE_CLOUD_LOCATION: your preferred region (default: us-central1)
 ```
 
-4. Start the application:
+4. Set up credentials (see "Setting Up Google Cloud Credentials" above)
+
+5. Start the application:
 ```bash
 docker-compose up -d
 ```
 
-5. Access the API documentation at `http://localhost:8000/docs`
+6. Access the API documentation at `http://localhost:8000/docs`
 
 ### Local Development
 
@@ -72,7 +102,14 @@ docker run -d -p 27017:27017 mongo:7.0
 docker run -d -p 6379:6379 redis:7-alpine
 ```
 
-3. Run the application:
+3. Set up environment variables:
+```bash
+export JWT_SECRET_KEY="your-secret-key-at-least-32-chars"
+export GOOGLE_CLOUD_PROJECT="your-gcp-project-id"
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+```
+
+4. Run the application:
 ```bash
 uvicorn app.main:app --reload
 ```
@@ -161,7 +198,10 @@ curl -X POST http://localhost:8000/auth/token/generate \
 | `JWT_SECRET_KEY` | JWT signing secret (min 32 chars) | (required) |
 | `JWT_ALGORITHM` | JWT algorithm | `HS256` |
 | `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | Token expiration | `30` |
-| `OPENAI_API_KEY` | OpenAI API key (optional) | - |
+| `GOOGLE_CLOUD_PROJECT` | Google Cloud project ID | (required for AI) |
+| `GOOGLE_CLOUD_LOCATION` | Vertex AI location | `us-central1` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON | (required for AI) |
+| `VERTEXAI_MODEL` | Vertex AI model name | `gemini-2.5-pro` |
 | `APP_HOST` | Application host | `0.0.0.0` |
 | `APP_PORT` | Application port | `8000` |
 | `DEBUG` | Debug mode | `true` |

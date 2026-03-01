@@ -78,3 +78,10 @@ docker-compose.override.yml
 
 # Local data
 data/
+
+# Google Cloud Service Account credentials
+*.json
+!package*.json
+credentials/
+service-account*.json
+gcp-credentials*.json

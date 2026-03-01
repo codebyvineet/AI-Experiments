@@ -32,8 +32,11 @@ class Settings(BaseSettings):
             )
         return v
     
-    # OpenAI Configuration
-    openai_api_key: str = ""
+    # Google Vertex AI Configuration
+    google_cloud_project: str = ""
+    google_cloud_location: str = "us-central1"
+    google_application_credentials: str = ""
+    vertexai_model: str = "gemini-2.5-pro"
     
     # Application Configuration
     app_host: str = "0.0.0.0"
