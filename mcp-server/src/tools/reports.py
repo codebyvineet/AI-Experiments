@@ -23,7 +23,12 @@ register_tool(
         "properties": {},
         "required": []
     },
-    handler=handle_get_statistics
+    handler=handle_get_statistics,
+    category="reports",
+    tags=["analytics", "statistics", "metrics"],
+    permissions=["items:read"],
+    endpoint="/items/stats",
+    http_method="GET"
 )
 
 
@@ -56,5 +61,10 @@ register_tool(
         },
         "required": []
     },
-    handler=handle_generate_report
+    handler=handle_generate_report,
+    category="reports",
+    tags=["analytics", "reports", "summary"],
+    permissions=["items:read"],
+    endpoint="/reports/generate",
+    http_method="POST"
 )

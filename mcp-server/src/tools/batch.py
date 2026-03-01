@@ -42,7 +42,12 @@ register_tool(
         },
         "required": ["items"]
     },
-    handler=handle_bulk_create
+    handler=handle_bulk_create,
+    category="batch",
+    tags=["batch", "bulk", "create", "write"],
+    permissions=["items:write"],
+    endpoint="/items/batch/create",
+    http_method="POST"
 )
 
 
@@ -73,5 +78,10 @@ register_tool(
         },
         "required": ["item_ids"]
     },
-    handler=handle_bulk_delete
+    handler=handle_bulk_delete,
+    category="batch",
+    tags=["batch", "bulk", "delete", "write"],
+    permissions=["items:delete"],
+    endpoint="/items/batch/delete",
+    http_method="POST"
 )

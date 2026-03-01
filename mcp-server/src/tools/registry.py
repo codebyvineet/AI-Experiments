@@ -1,5 +1,8 @@
 """Tool registry for MCP Server.
 
+This module provides backward compatibility with the in-memory registry
+while the MongoDB-backed registry is being adopted.
+
 All tools are registered here and executed through the Backend API.
 """
 import logging
@@ -19,7 +22,12 @@ def register_tool(
     name: str,
     description: str,
     input_schema: Dict[str, Any],
-    handler: Callable
+    handler: Callable,
+    category: str = "general",
+    tags: List[str] = None,
+    permissions: List[str] = None,
+    endpoint: str = None,
+    http_method: str = "POST"
 ) -> None:
     """Register a tool with its handler.
     
@@ -28,20 +36,37 @@ def register_tool(
         description: Human-readable description of what the tool does
         input_schema: JSON Schema for the tool's input parameters
         handler: Async function that executes the tool
+        category: Tool category for grouping
+        tags: Searchable tags
+        permissions: Required permissions
+        endpoint: Backend API endpoint
+        http_method: HTTP method
     """
     logger.info(f"[Tool Registry] Registering tool: {name}")
     
     _TOOLS[name] = {
         "name": name,
         "description": description,
-        "inputSchema": input_schema
+        "inputSchema": input_schema,
+        "category": category,
+        "tags": tags or [],
+        "permissions": permissions or [],
+        "endpoint": endpoint,
+        "http_method": http_method
     }
     _HANDLERS[name] = handler
 
 
 def list_all_tools() -> List[Dict[str, Any]]:
     """List all registered tools with their schemas."""
-    return list(_TOOLS.values())
+    return [
+        {
+            "name": t["name"],
+            "description": t["description"],
+            "inputSchema": t["inputSchema"]
+        }
+        for t in _TOOLS.values()
+    ]
 
 
 def get_tool(name: str) -> Optional[Dict[str, Any]]:

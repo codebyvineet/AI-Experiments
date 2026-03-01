@@ -23,7 +23,12 @@ register_tool(
         "properties": {},
         "required": []
     },
-    handler=handle_get_user_profile
+    handler=handle_get_user_profile,
+    category="users",
+    tags=["user", "profile", "read"],
+    permissions=["users:read"],
+    endpoint="/auth/me",
+    http_method="GET"
 )
 
 
@@ -61,5 +66,10 @@ register_tool(
         },
         "required": []
     },
-    handler=handle_update_user_profile
+    handler=handle_update_user_profile,
+    category="users",
+    tags=["user", "profile", "write", "update"],
+    permissions=["users:write"],
+    endpoint="/auth/profile",
+    http_method="PUT"
 )

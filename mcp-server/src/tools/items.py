@@ -46,7 +46,12 @@ register_tool(
         },
         "required": ["name"]
     },
-    handler=handle_create_item
+    handler=handle_create_item,
+    category="items",
+    tags=["crud", "write", "create"],
+    permissions=["items:write"],
+    endpoint="/items/",
+    http_method="POST"
 )
 
 
@@ -76,7 +81,12 @@ register_tool(
         },
         "required": ["item_id"]
     },
-    handler=handle_read_item
+    handler=handle_read_item,
+    category="items",
+    tags=["crud", "read", "get"],
+    permissions=["items:read"],
+    endpoint="/items/{item_id}",
+    http_method="GET"
 )
 
 
@@ -121,7 +131,12 @@ register_tool(
         },
         "required": ["item_id"]
     },
-    handler=handle_update_item
+    handler=handle_update_item,
+    category="items",
+    tags=["crud", "write", "update"],
+    permissions=["items:write"],
+    endpoint="/items/{item_id}",
+    http_method="PUT"
 )
 
 
@@ -151,7 +166,12 @@ register_tool(
         },
         "required": ["item_id"]
     },
-    handler=handle_delete_item
+    handler=handle_delete_item,
+    category="items",
+    tags=["crud", "write", "delete"],
+    permissions=["items:delete"],
+    endpoint="/items/{item_id}",
+    http_method="DELETE"
 )
 
 
@@ -183,5 +203,10 @@ register_tool(
         },
         "required": []
     },
-    handler=handle_list_items
+    handler=handle_list_items,
+    category="items",
+    tags=["crud", "read", "list"],
+    permissions=["items:read"],
+    endpoint="/items/",
+    http_method="GET"
 )

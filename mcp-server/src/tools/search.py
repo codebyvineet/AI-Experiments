@@ -49,5 +49,10 @@ register_tool(
         },
         "required": ["query"]
     },
-    handler=handle_search_items
+    handler=handle_search_items,
+    category="search",
+    tags=["search", "query", "find"],
+    permissions=["items:read"],
+    endpoint="/items/search",
+    http_method="GET"
 )
