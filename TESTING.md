@@ -17,11 +17,11 @@ curl http://localhost:3000 -o /dev/null -w "%{http_code}"
 If not running:
 ```bash
 # Start backend (Docker)
-cd /Users/nik/workspace/google-copilot/AI-Experiments
 docker-compose up -d
 
 # Start frontend
 cd frontend
+npm install  # First time only
 npm run dev
 ```
 
