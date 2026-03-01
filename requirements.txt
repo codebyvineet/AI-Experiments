@@ -21,6 +21,7 @@ google-cloud-aiplatform>=1.50.0
 # Authentication (updated for security)
 python-jose[cryptography]>=3.4.0
 passlib[bcrypt]>=1.7.4
+bcrypt==4.0.1
 
 # MCP Server (updated for security - fixes DNS rebinding, DoS vulnerabilities)
 mcp>=1.23.0
