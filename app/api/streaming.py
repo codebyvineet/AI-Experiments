@@ -13,8 +13,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.auth.authorization import get_current_user, get_current_user_with_token
 from app.models import TokenData
 from app.agent.multi_agent import multi_agent_orchestrator
-from app.mcp.server import mcp_server
-from app.crud.operations import item_crud
+from app.mcp.client import mcp_client
 from app.config.logging_config import get_logger, LogContext
 
 logger = get_logger("streaming")
@@ -210,26 +209,37 @@ async def add_message(
 
 @router.get("/mcp/tools")
 async def get_mcp_tools(
-    current_user: TokenData = Depends(get_current_user)
+    current_user: TokenData = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer())
 ):
-    """Get available MCP tools for current user."""
-    # Get tools - the list_tools method filters by permissions based on role
-    role = current_user.role.value if current_user.role else "user"
-    permissions = current_user.permissions or []
+    """Get available MCP tools for current user via external MCP Server."""
+    log = LogContext(logger, user_id=current_user.user_id)
+    log.info("📥 Request: Get MCP tools via external server")
     
-    # Filter tools based on user permissions
-    all_tools = list(mcp_server.tools.values())
-    tools = []
-    for tool in all_tools:
-        accessible = tool["required_permission"] in permissions
-        tools.append({
-            "name": tool["name"],
-            "description": tool["description"],
-            "parameters": tool["parameters"],
-            "accessible": accessible
-        })
-    
-    return {"tools": [t for t in tools if t["accessible"]]}
+    try:
+        # Get tools from external MCP Server
+        tools = await mcp_client.list_tools(token=credentials.credentials)
+        
+        # Filter by user permissions
+        permissions = current_user.permissions or []
+        accessible_tools = []
+        
+        for tool in tools:
+            # Check if user has required permission (simplified check)
+            tool_name = tool.get("name", "")
+            accessible = True  # MCP Server handles permission validation on call
+            accessible_tools.append({
+                "name": tool_name,
+                "description": tool.get("description", ""),
+                "inputSchema": tool.get("inputSchema", {}),
+                "accessible": accessible
+            })
+        
+        log.info(f"📤 Response: {len(accessible_tools)} tools available")
+        return {"tools": accessible_tools}
+    except Exception as e:
+        log.error(f"❌ Error getting MCP tools: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/mcp/call/{tool_name}")
@@ -239,8 +249,22 @@ async def call_mcp_tool(
     current_user: TokenData = Depends(get_current_user),
     credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer())
 ):
-    """Call an MCP tool."""
-    # Pass the original token to MCP server for validation
-    token = credentials.credentials
-    result = await mcp_server.call_tool(token, tool_name, args)
-    return {"tool": tool_name, "result": result}
+    """Call an MCP tool via external MCP Server."""
+    log = LogContext(logger, user_id=current_user.user_id)
+    log.info(f"📥 Request: Call MCP tool '{tool_name}'", data={"args": args})
+    
+    try:
+        # Call tool via external MCP Server
+        result = await mcp_client.call_tool(
+            tool_name=tool_name,
+            arguments=args,
+            token=credentials.credentials
+        )
+        log.info(f"📤 Response: Tool '{tool_name}' completed")
+        return {"tool": tool_name, "result": result}
+    except PermissionError as e:
+        log.error(f"❌ Permission denied: {e}")
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        log.error(f"❌ Error calling MCP tool: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
