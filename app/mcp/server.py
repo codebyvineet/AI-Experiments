@@ -5,7 +5,11 @@ from datetime import datetime, timezone
 import json
 
 from app.auth import authorization_tool, decode_token, ROLE_PERMISSIONS
-from app.models import UserRole, MCPRequest, MCPResponse
+from app.models import UserRole, MCPRequest, MCPResponse, ItemCreate, ItemUpdate
+from app.crud.operations import item_crud, user_crud
+from app.config.logging_config import get_logger, LogContext
+
+logger = get_logger("mcp_server")
 
 
 class MCPServer:
@@ -36,11 +40,17 @@ class MCPServer:
             },
             "read_item": {
                 "name": "read_item",
-                "description": "Read an item from the system",
+                "description": "Read an item from the system by ID",
                 "required_permission": "items:read",
                 "parameters": {
                     "item_id": {"type": "string", "required": True}
                 }
+            },
+            "list_items": {
+                "name": "list_items",
+                "description": "List all items in the system",
+                "required_permission": "items:read",
+                "parameters": {}
             },
             "update_item": {
                 "name": "update_item",
@@ -217,9 +227,12 @@ class MCPServer:
         tool_name: str,
         arguments: Dict[str, Any]
     ) -> MCPResponse:
-        """Call a tool with RBAC validation."""
+        """Call a tool with RBAC validation and actual execution."""
+        log = LogContext(logger, agent_type="mcp", phase="tool_execution")
+        
         tool = self.tools.get(tool_name)
         if not tool:
+            log.error(f"Tool not found: {tool_name}")
             return MCPResponse(error={
                 "code": "tool_not_found",
                 "message": f"Tool '{tool_name}' not found"
@@ -228,6 +241,7 @@ class MCPServer:
         # Validate access
         access = self.validate_access(token, tool["required_permission"])
         if not access["authorized"]:
+            log.error(f"Unauthorized access to {tool_name}: {access.get('error')}")
             return MCPResponse(error={
                 "code": "unauthorized",
                 "message": access["error"]
@@ -236,19 +250,181 @@ class MCPServer:
         # Validate required parameters
         for param_name, param_info in tool["parameters"].items():
             if param_info.get("required") and param_name not in arguments:
+                log.error(f"Missing required parameter: {param_name}")
                 return MCPResponse(error={
                     "code": "invalid_arguments",
                     "message": f"Missing required parameter: {param_name}"
                 })
         
-        # Execute tool (in production, this would dispatch to actual implementations)
-        return MCPResponse(result={
-            "tool": tool_name,
-            "arguments": arguments,
-            "executed_by": access["username"],
-            "executed_at": datetime.now(timezone.utc).isoformat(),
-            "status": "success"
-        })
+        log.info(f"🔧 Executing MCP tool: {tool_name}", data={"arguments": arguments, "user": access.get("username")})
+        
+        # Actually execute the tool
+        try:
+            result = await self._execute_tool(tool_name, arguments, access)
+            log.info(f"✅ MCP tool {tool_name} completed", data={"result": result})
+            return MCPResponse(result=result)
+        except Exception as e:
+            log.error(f"❌ MCP tool {tool_name} failed: {str(e)}")
+            return MCPResponse(error={
+                "code": "execution_error",
+                "message": str(e)
+            })
+    
+    async def _execute_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        access: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute the actual tool operation."""
+        user_id = access.get("user_id", "unknown")
+        username = access.get("username", "unknown")
+        
+        if tool_name == "create_item":
+            # Create item in database
+            item_data = ItemCreate(
+                name=arguments.get("name"),
+                description=arguments.get("description", ""),
+                data=arguments.get("data", {})
+            )
+            item = await item_crud.create_item(item_data, user_id)
+            return {
+                "tool": tool_name,
+                "status": "success",
+                "item_id": item.id,
+                "item": {
+                    "id": item.id,
+                    "name": item.name,
+                    "description": item.description,
+                    "data": item.data,
+                    "created_at": item.created_at.isoformat() if item.created_at else None
+                },
+                "executed_by": username,
+                "executed_at": datetime.now(timezone.utc).isoformat()
+            }
+        
+        elif tool_name == "read_item":
+            # Read item from database
+            item_id = arguments.get("item_id")
+            item = await item_crud.get_item(item_id)
+            if not item:
+                raise ValueError(f"Item not found: {item_id}")
+            return {
+                "tool": tool_name,
+                "status": "success",
+                "item": {
+                    "id": item.id,
+                    "name": item.name,
+                    "description": item.description,
+                    "data": item.data,
+                    "owner_id": item.owner_id,
+                    "created_at": item.created_at.isoformat() if item.created_at else None,
+                    "updated_at": item.updated_at.isoformat() if item.updated_at else None
+                },
+                "executed_by": username,
+                "executed_at": datetime.now(timezone.utc).isoformat()
+            }
+        
+        elif tool_name == "update_item":
+            # Update item in database
+            item_id = arguments.get("item_id")
+            updates = arguments.get("updates", {})
+            item_update = ItemUpdate(**updates)
+            item = await item_crud.update_item(item_id, item_update, user_id)
+            if not item:
+                raise ValueError(f"Item not found or not owned by user: {item_id}")
+            return {
+                "tool": tool_name,
+                "status": "success",
+                "item_id": item.id,
+                "item": {
+                    "id": item.id,
+                    "name": item.name,
+                    "description": item.description,
+                    "data": item.data,
+                    "updated_at": item.updated_at.isoformat() if item.updated_at else None
+                },
+                "executed_by": username,
+                "executed_at": datetime.now(timezone.utc).isoformat()
+            }
+        
+        elif tool_name == "delete_item":
+            # Delete item from database
+            item_id = arguments.get("item_id")
+            deleted = await item_crud.delete_item(item_id, user_id)
+            if not deleted:
+                raise ValueError(f"Item not found or not owned by user: {item_id}")
+            return {
+                "tool": tool_name,
+                "status": "success",
+                "item_id": item_id,
+                "deleted": True,
+                "executed_by": username,
+                "executed_at": datetime.now(timezone.utc).isoformat()
+            }
+        
+        elif tool_name == "list_items":
+            # List all items
+            items = await item_crud.list_items()
+            return {
+                "tool": tool_name,
+                "status": "success",
+                "items": [
+                    {
+                        "id": item.id,
+                        "name": item.name,
+                        "description": item.description,
+                        "data": item.data
+                    }
+                    for item in items
+                ],
+                "count": len(items),
+                "executed_by": username,
+                "executed_at": datetime.now(timezone.utc).isoformat()
+            }
+        
+        elif tool_name == "execute_agent":
+            # Agent execution - return acknowledgment (actual execution handled elsewhere)
+            return {
+                "tool": tool_name,
+                "status": "success",
+                "session_id": arguments.get("session_id"),
+                "action": arguments.get("action"),
+                "message": "Agent execution requested",
+                "executed_by": username,
+                "executed_at": datetime.now(timezone.utc).isoformat()
+            }
+        
+        elif tool_name == "manage_users":
+            # User management (admin only)
+            action = arguments.get("action")
+            user_data = arguments.get("user_data", {})
+            
+            if action == "list":
+                users = await user_crud.list_users()
+                return {
+                    "tool": tool_name,
+                    "status": "success",
+                    "action": action,
+                    "users": [
+                        {"id": u.id, "username": u.username, "role": u.role, "email": u.email}
+                        for u in users
+                    ],
+                    "executed_by": username,
+                    "executed_at": datetime.now(timezone.utc).isoformat()
+                }
+            else:
+                return {
+                    "tool": tool_name,
+                    "status": "success",
+                    "action": action,
+                    "message": f"User management action '{action}' acknowledged",
+                    "executed_by": username,
+                    "executed_at": datetime.now(timezone.utc).isoformat()
+                }
+        
+        else:
+            raise ValueError(f"Unknown tool: {tool_name}")
     
     async def read_resource(
         self,

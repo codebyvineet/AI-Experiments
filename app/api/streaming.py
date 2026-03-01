@@ -3,14 +3,14 @@
 import json
 import asyncio
 import uuid
-from typing import Dict, Any, AsyncGenerator
+from typing import Dict, Any, AsyncGenerator, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from app.auth.authorization import get_current_user
+from app.auth.authorization import get_current_user, get_current_user_with_token
 from app.models import TokenData
 from app.agent.multi_agent import multi_agent_orchestrator
 from app.mcp.server import mcp_server
@@ -47,9 +47,10 @@ async def event_generator(
 @router.post("/sessions")
 async def create_streaming_session(
     request: CreateSessionRequest,
-    current_user: TokenData = Depends(get_current_user)
+    auth_data: Tuple[TokenData, str] = Depends(get_current_user_with_token)
 ):
     """Create a new multi-agent session."""
+    current_user, token = auth_data
     request_id = str(uuid.uuid4())[:8]
     log = LogContext(logger, request_id=request_id, user_id=current_user.user_id)
     
@@ -64,7 +65,8 @@ async def create_streaming_session(
     session = await multi_agent_orchestrator.create_session(
         user_id=user_id, 
         goal=request.goal,
-        user_permissions=user_permissions
+        user_permissions=user_permissions,
+        token=token  # Pass token for MCP tool calls during execution
     )
     
     log.info(f"📤 Response: Session created", data={"session_id": session.session_id})

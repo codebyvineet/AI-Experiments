@@ -51,6 +51,7 @@ class MultiAgentSession:
     user_id: str
     goal: str
     user_permissions: List[str] = field(default_factory=list)
+    token: Optional[str] = None  # JWT token for MCP tool calls
     plan: List[Dict[str, Any]] = field(default_factory=list)
     tasks: List[AgentTask] = field(default_factory=list)
     messages: List[Dict[str, Any]] = field(default_factory=list)
@@ -74,7 +75,7 @@ class MultiAgentOrchestrator:
         self.event_handlers: Dict[str, List[Callable]] = {}
         self.execution_results: Dict[str, List[Dict[str, Any]]] = {}
     
-    async def create_session(self, user_id: str, goal: str, user_permissions: Optional[List[str]] = None) -> MultiAgentSession:
+    async def create_session(self, user_id: str, goal: str, user_permissions: Optional[List[str]] = None, token: Optional[str] = None) -> MultiAgentSession:
         """Create a new multi-agent session."""
         log = LogContext(logger, user_id=user_id)
         
@@ -89,7 +90,8 @@ class MultiAgentOrchestrator:
             session_id=session_id,
             user_id=user_id,
             goal=goal,
-            user_permissions=user_permissions or []
+            user_permissions=user_permissions or [],
+            token=token  # Store token for MCP tool calls
         )
         self.sessions[session_id] = session
         self.execution_results[session_id] = []
@@ -464,9 +466,15 @@ class MultiAgentOrchestrator:
             result = await ai_service.execute_task(
                 task_name=task["name"],
                 task_description=task.get("description", task["name"]),
-                context={"goal": goal, "step": step["description"]},
+                context={
+                    "goal": goal, 
+                    "step": step["description"],
+                    "tool": task.get("tool"),
+                    "tool_params": task.get("tool_params", {})
+                },
                 session_id=session_id,
-                step_info=step
+                step_info=step,
+                token=session.token  # Pass token for MCP calls
             )
             
             task["status"] = "completed"
@@ -546,10 +554,13 @@ class MultiAgentOrchestrator:
                 context={
                     "goal": goal, 
                     "step": step["description"],
-                    "previous_results": previous_results[-3:] if previous_results else []
+                    "previous_results": previous_results[-3:] if previous_results else [],
+                    "tool": task.get("tool"),
+                    "tool_params": task.get("tool_params", {})
                 },
                 session_id=session_id,
-                step_info=step
+                step_info=step,
+                token=session.token  # Pass token for MCP calls
             )
             
             task["status"] = "completed"

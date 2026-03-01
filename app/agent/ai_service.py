@@ -11,6 +11,7 @@ from google.oauth2 import service_account
 
 from app.config.settings import get_settings
 from app.config.logging_config import get_logger, LogContext
+from app.mcp.server import mcp_server
 
 logger = get_logger("ai_service")
 
@@ -320,9 +321,10 @@ Respond ONLY with valid JSON, no markdown or explanation.
         task_description: str,
         context: Dict[str, Any],
         session_id: str,
-        step_info: Dict[str, Any]
+        step_info: Dict[str, Any],
+        token: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Execute a single task using AI with tool awareness."""
+        """Execute a single task, directly calling MCP tools when specified."""
         log = LogContext(
             logger, 
             session_id=session_id, 
@@ -337,8 +339,48 @@ Respond ONLY with valid JSON, no markdown or explanation.
         start_time = time.time()
         
         # Get tool information from the task if specified
-        task_tool = context.get("tool", step_info.get("tool"))
-        task_tool_params = context.get("tool_params", step_info.get("tool_params", {}))
+        task_tool = context.get("tool") or step_info.get("tool")
+        task_tool_params = context.get("tool_params") or step_info.get("tool_params", {})
+        
+        # If a specific MCP tool is specified AND we have a token, execute it directly
+        if task_tool and token and task_tool in ["create_item", "read_item", "update_item", "delete_item", "list_items"]:
+            log.info(f"🔧 Directly executing MCP tool: {task_tool}", data={"params": task_tool_params})
+            
+            try:
+                mcp_result = await mcp_server.call_tool(token, task_tool, task_tool_params)
+                duration_ms = int((time.time() - start_time) * 1000)
+                
+                if mcp_result.error:
+                    log.error(f"❌ MCP tool {task_tool} failed: {mcp_result.error}")
+                    return {
+                        "task_name": task_name,
+                        "status": "failed",
+                        "result": f"MCP tool error: {mcp_result.error.get('message', 'Unknown error')}",
+                        "output_data": {"error": mcp_result.error},
+                        "duration_ms": duration_ms
+                    }
+                
+                log.info(f"✅ MCP tool {task_tool} succeeded", data={"result": mcp_result.result})
+                return {
+                    "task_name": task_name,
+                    "status": "success",
+                    "result": f"Successfully executed {task_tool}",
+                    "output_data": mcp_result.result or {},
+                    "mcp_tool_executed": task_tool,
+                    "notes": "",
+                    "duration_ms": duration_ms
+                }
+            except Exception as e:
+                duration_ms = int((time.time() - start_time) * 1000)
+                log.error(f"❌ MCP tool execution error: {e}")
+                return {
+                    "task_name": task_name,
+                    "status": "failed",
+                    "result": f"MCP execution error: {str(e)}",
+                    "duration_ms": duration_ms
+                }
+        
+        # For non-MCP tasks or tasks without tools, use AI to process
         mcp_tools_used = step_info.get("mcp_tools_used", [])
         
         # Build context-aware prompt
@@ -349,8 +391,7 @@ Respond ONLY with valid JSON, no markdown or explanation.
 Tool: {task_tool or mcp_tools_used}
 Parameters: {json.dumps(task_tool_params)}
 
-When executing this task, you should invoke the specified MCP tool with the given parameters.
-The result should reflect the actual outcome of the tool execution.
+This is an informational task. The MCP tool will be executed separately.
 """
         
         prompt = f"""You are an execution agent performing a specific task in a system with MCP tools.
@@ -373,18 +414,11 @@ STEP CONTEXT:
 ADDITIONAL CONTEXT:
 {json.dumps(context, indent=2)}
 
-Execute this task and provide a structured result. If an MCP tool should be called, include the tool call details:
+Execute this task and provide a structured result:
 {{
     "status": "success|partial|failed",
     "result": "Description of what was accomplished",
     "output_data": {{}},
-    "mcp_tool_calls": [
-        {{
-            "tool": "tool_name",
-            "params": {{}},
-            "expected_result": "what this call should produce"
-        }}
-    ],
     "notes": "Any observations or recommendations",
     "next_actions": []
 }}

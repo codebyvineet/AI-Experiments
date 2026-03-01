@@ -131,6 +131,23 @@ async def get_current_user(
     return decode_token(token)
 
 
+async def get_current_user_with_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> tuple:
+    """Get current authenticated user and raw token."""
+    token = credentials.credentials
+    
+    # Check if token is blacklisted
+    if await redis_checkpoint.is_token_blacklisted(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return decode_token(token), token
+
+
 def require_permission(permission: str):
     """Dependency to require specific permission."""
     async def permission_checker(
