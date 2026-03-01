@@ -1,0 +1,109 @@
+"""Data models for the application."""
+
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+from pydantic import BaseModel, Field
+from enum import Enum
+
+
+class UserRole(str, Enum):
+    """User roles for RBAC."""
+    ADMIN = "admin"
+    USER = "user"
+    READ_ONLY = "read_only"
+
+
+class User(BaseModel):
+    """User model."""
+    id: Optional[str] = None
+    username: str
+    email: str
+    hashed_password: str
+    role: UserRole = UserRole.USER
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class UserCreate(BaseModel):
+    """User creation model."""
+    username: str
+    email: str
+    password: str
+    role: UserRole = UserRole.USER
+
+
+class UserResponse(BaseModel):
+    """User response model (without password)."""
+    id: str
+    username: str
+    email: str
+    role: UserRole
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class Token(BaseModel):
+    """Token model."""
+    access_token: str
+    token_type: str = "bearer"
+
+
+class TokenData(BaseModel):
+    """Token data model."""
+    user_id: Optional[str] = None
+    username: Optional[str] = None
+    role: Optional[UserRole] = None
+    permissions: Optional[List[str]] = None
+
+
+class Item(BaseModel):
+    """Generic item model for CRUD operations."""
+    id: Optional[str] = None
+    name: str
+    description: Optional[str] = None
+    data: Dict[str, Any] = Field(default_factory=dict)
+    owner_id: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ItemCreate(BaseModel):
+    """Item creation model."""
+    name: str
+    description: Optional[str] = None
+    data: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ItemUpdate(BaseModel):
+    """Item update model."""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
+
+
+class AgentState(BaseModel):
+    """Agent state model for checkpointing."""
+    id: Optional[str] = None
+    session_id: str
+    user_id: str
+    state_type: str = "hot"  # "hot" for MongoDB, "cold" for Redis
+    state_data: Dict[str, Any] = Field(default_factory=dict)
+    plan: Optional[List[Dict[str, Any]]] = None
+    current_step: int = 0
+    is_complete: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class MCPRequest(BaseModel):
+    """MCP Server request model."""
+    method: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MCPResponse(BaseModel):
+    """MCP Server response model."""
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[Dict[str, Any]] = None

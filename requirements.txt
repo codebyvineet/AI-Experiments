@@ -1,0 +1,28 @@
+# FastAPI and web framework
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+pydantic==2.6.1
+pydantic-settings==2.1.0
+
+# Database drivers
+motor==3.3.2
+pymongo==4.6.1
+redis==5.0.1
+
+# LangGraph and LangChain (updated for security)
+langgraph==0.0.26
+langchain==0.1.6
+langchain-core==0.3.81
+langchain-openai==0.0.5
+
+# Authentication (updated for security)
+python-jose[cryptography]==3.4.0
+passlib[bcrypt]==1.7.4
+
+# MCP Server
+mcp==1.0.0
+
+# Utilities
+python-dotenv==1.0.1
+httpx==0.26.0
+python-multipart==0.0.9

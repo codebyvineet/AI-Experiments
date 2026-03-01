@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGODB_URL=mongodb://mongodb:27017
+      - MONGODB_DATABASE=mcp_demo
+      - REDIS_URL=redis://redis:6379
+      - REDIS_DB=0
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-super-secret-jwt-key-change-in-production}
+      - JWT_ALGORITHM=HS256
+      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8000
+      - DEBUG=true
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
+  redis_data:
