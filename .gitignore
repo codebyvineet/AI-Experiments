@@ -82,6 +82,11 @@ data/
 # Google Cloud Service Account credentials
 *.json
 !package*.json
+!tsconfig*.json
 credentials/
 service-account*.json
 gcp-credentials*.json
+
+# Node.js
+node_modules/
+frontend/dist/
