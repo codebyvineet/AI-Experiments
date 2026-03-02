@@ -1,5 +1,229 @@
 # LangGraph Migration Plan
 
+## Executive Summary
+
+After extensive research, here are the recommended frameworks for replacing our custom code:
+
+| Component | Current | Recommended | Alternative |
+|-----------|---------|-------------|-------------|
+| **Agent Orchestration** | Custom `multi_agent.py` | **LangGraph** | CrewAI, Agno |
+| **MCP Server** | Custom Python | **FastMCP** | mcp-framework (TS) |
+| **MCP Client** | Custom `mcp/client.py` | **langchain-mcp-adapters** | mcp-use |
+| **Checkpointing** | Custom MongoDB/Redis | **langgraph-checkpoint-mongodb** | Built-in |
+| **Authorization** | Custom JWT | **FastMCP BearerAuthProvider** | Keep custom |
+
+---
+
+## Agent Framework Comparison (2024-2025)
+
+### 1. LangGraph ⭐ RECOMMENDED
+
+| Aspect | Details |
+|--------|---------|
+| **Architecture** | Graph-based state machines (DAG) |
+| **Strengths** | Deterministic workflows, built-in checkpointing, interrupts for HITL |
+| **Weaknesses** | Steeper learning curve |
+| **Best For** | Our use case - complex multi-step with approval |
+
+```python
+from langgraph.graph import StateGraph
+from langgraph.checkpoint.mongodb.aio import AsyncMongoDBSaver
+
+builder = StateGraph(AgentState)
+builder.add_node("planner", planner_node)
+builder.add_node("approval", approval_node)  # interrupt()
+builder.add_node("executor", executor_node)
+graph = builder.compile(checkpointer=AsyncMongoDBSaver(...))
+```
+
+### 2. CrewAI
+
+| Aspect | Details |
+|--------|---------|
+| **Architecture** | Role-based teams (Crews + Flows) |
+| **Strengths** | Easy setup, team-like API, 5.76x faster than LangGraph in some benchmarks |
+| **Weaknesses** | Less suited for complex branching |
+| **Best For** | Simple pipelines with clear roles |
+
+```python
+from crewai import Agent, Crew, Task
+
+researcher = Agent(role="Researcher", goal="Find data", tools=[...])
+crew = Crew(agents=[researcher], tasks=[...])
+result = crew.kickoff()
+```
+
+### 3. Agno (NEW - 2025)
+
+| Aspect | Details |
+|--------|---------|
+| **Architecture** | Modern Python framework with AgentOS |
+| **Strengths** | Built-in MCP support, production-ready FastAPI backend, tracing UI |
+| **Weaknesses** | Newer, smaller community |
+| **Best For** | Quick deployment with monitoring |
+
+```python
+from agno.agent import Agent
+from agno.tools.mcp import MCPTools
+from agno.os import AgentOS
+
+agent = Agent(
+    name="Assistant",
+    model=Claude(id="claude-sonnet-4-6"),
+    tools=[MCPTools(url="http://mcp-server:8001")]
+)
+app = AgentOS(agents=[agent]).get_app()
+```
+
+### 4. AutoGen (Microsoft)
+
+| Aspect | Details |
+|--------|---------|
+| **Architecture** | Multi-agent conversation (group chat) |
+| **Strengths** | Flexible, Azure integration, visual debugging |
+| **Weaknesses** | Less reproducible, being folded into new Microsoft Agent Framework |
+| **Best For** | Research, experimentation |
+
+### Framework Decision Matrix
+
+| Requirement | LangGraph | CrewAI | Agno | AutoGen |
+|-------------|-----------|--------|------|---------|
+| Human-in-the-loop | ✅ Native `interrupt()` | ⚠️ Manual | ✅ Approval flows | ✅ HITL support |
+| MongoDB checkpoints | ✅ `AsyncMongoDBSaver` | ❌ Custom needed | ✅ Built-in | ⚠️ Custom |
+| MCP integration | ✅ `langchain-mcp-adapters` | ⚠️ Manual | ✅ Native `MCPTools` | ⚠️ Manual |
+| Parallel execution | ✅ `Send()` pattern | ✅ Parallel tasks | ✅ Async | ✅ Concurrent agents |
+| SSE streaming | ✅ `astream()` | ⚠️ Custom | ✅ Built-in | ⚠️ Custom |
+| Production ready | ✅ LangSmith | ⚠️ Basic | ✅ AgentOS UI | ⚠️ Studio |
+
+**Winner: LangGraph** - Best fit for our requirements (HITL approval, MongoDB checkpoints, MCP tools, streaming)
+
+---
+
+## MCP Framework Comparison
+
+### 1. FastMCP ⭐ RECOMMENDED for Server
+
+| Aspect | Details |
+|--------|---------|
+| **Language** | Python |
+| **Auth Support** | API Key, JWT Bearer, OAuth 2.1 |
+| **Strengths** | Most popular Python MCP framework, built-in auth middleware |
+
+```python
+from fastmcp import FastMCP
+from fastmcp.server.auth import BearerAuthProvider
+
+mcp = FastMCP(auth_provider=BearerAuthProvider(public_key=public_key))
+
+@mcp.tool()
+def create_item(ctx, name: str, description: str):
+    if not ctx.user.has_scope("items:write"):
+        raise Exception("Forbidden")
+    # Tool logic
+```
+
+### 2. mcp-framework (TypeScript/npm)
+
+| Aspect | Details |
+|--------|---------|
+| **Language** | TypeScript |
+| **Strengths** | CLI tooling, auto-discovery, type safety with Zod |
+| **Best For** | Node.js ecosystems, IDE integrations |
+
+```typescript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp";
+import { z } from "zod";
+
+const server = new McpServer({ name: "demo", version: "1.0.0" });
+server.tool("add", { a: z.number(), b: z.number() }, async ({ a, b }) => ({
+  content: [{ type: "text", text: `${a + b}` }]
+}));
+```
+
+### 3. langchain-mcp-adapters ⭐ RECOMMENDED for Client
+
+| Aspect | Details |
+|--------|---------|
+| **Purpose** | MCP client for LangChain/LangGraph |
+| **Strengths** | Multi-server support, converts MCP tools to LangChain format |
+
+```python
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
+client = MultiServerMCPClient({
+    "items_server": {
+        "url": "http://mcp-server:8001/mcp",
+        "transport": "http",
+        "headers": {"Authorization": "Bearer <token>"}
+    }
+})
+tools = await client.get_tools()
+```
+
+### 4. mcp-use (Python)
+
+| Aspect | Details |
+|--------|---------|
+| **Purpose** | Lightweight Python MCP server/client |
+| **Strengths** | Minimal setup, FastAPI integration |
+
+---
+
+## Updated Migration Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         FRONTEND (React)                                 │
+│   AgentPanel.jsx ─── EventSource for SSE streaming                      │
+└────────────────────────────────┬────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    BACKEND (FastAPI + LangGraph)                         │
+│                                                                          │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │                    LangGraph StateGraph                          │   │
+│   │                                                                  │   │
+│   │   START ──▶ Planner ──▶ Approval ──▶ Executor ──▶ Summary ──▶ END│   │
+│   │               │          (interrupt)      │                      │   │
+│   │               │              │            ▼                      │   │
+│   │               │              │      ┌──────────┐                 │   │
+│   │               │              │      │ToolNode │                  │   │
+│   │               │              │      │  (MCP)  │                  │   │
+│   │               │              │      └──────────┘                 │   │
+│   │               │              │                                   │   │
+│   │   ┌───────────┴──────────────┴─────────────────────────────┐    │   │
+│   │   │            AsyncMongoDBSaver (Checkpoints)              │    │   │
+│   │   └─────────────────────────────────────────────────────────┘    │   │
+│   └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │           langchain-mcp-adapters (MCP Client)                    │   │
+│   │   MultiServerMCPClient → Loads MCP tools with auth headers      │   │
+│   └──────────────────────────────────────────────────────────────────┘   │
+└────────────────────────────────┬────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    MCP SERVER (FastMCP)                                  │
+│                                                                          │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │              BearerAuthProvider (JWT Validation)                 │   │
+│   │   - Validates token signature                                    │   │
+│   │   - Extracts user_id, role, permissions                         │   │
+│   │   - Enforces RBAC on each tool call                             │   │
+│   └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│   @mcp.tool()                                                            │
+│   def create_item(ctx, name, description, data):                        │
+│       if not ctx.user.has_scope("items:write"):                         │
+│           raise Forbidden()                                             │
+│       return backend_api.create_item(...)                               │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Current State Analysis
 
 ### What We Have (Custom Implementation)
