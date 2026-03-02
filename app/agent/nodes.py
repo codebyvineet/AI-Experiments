@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from langgraph.types import interrupt, Send
 
 from app.agent.state import AgentState, PlanStep, TaskResult
-from app.agent.tools import call_mcp_tool
+from app.mcp.client import mcp_client
 from app.config.logging_config import get_logger, LogContext
 
 logger = get_logger("langgraph_nodes")
@@ -230,8 +230,30 @@ async def task_executor_node(task_state: Dict[str, Any]) -> Dict[str, Any]:
     
     try:
         if tool_name:
-            # Call MCP tool
-            result = await call_mcp_tool(tool_name, tool_params, token)
+            # Call MCP tool via mcp_client
+            log.info(f"[AIFLOW] MCP Tool Called: {tool_name} with params: {json.dumps(tool_params)}")
+            
+            try:
+                tool_result = await mcp_client.call_tool(tool_name, tool_params, token)
+                result = {
+                    "status": "success",
+                    "result": tool_result,
+                    "tool": tool_name
+                }
+            except PermissionError as pe:
+                result = {
+                    "status": "authorization_failed",
+                    "result": str(pe),
+                    "tool": tool_name
+                }
+            except Exception as tool_error:
+                result = {
+                    "status": "failed",
+                    "result": str(tool_error),
+                    "tool": tool_name
+                }
+            
+            log.info(f"[AIFLOW] MCP Tool Result: {tool_name} -> {result}")
             
             duration_ms = int((time.time() - start_time) * 1000)
             

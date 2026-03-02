@@ -63,9 +63,31 @@ The application uses best-in-class frameworks instead of custom code:
 
 | Component | Before (Custom) | After (Framework) | Reduction |
 |-----------|-----------------|-------------------|-----------|
-| MCP Server | ~800 lines | ~250 lines | **69%** |
-| MCP Client | ~250 lines | ~180 lines | **28%** |
-| Checkpointing | 0 (MongoDB only) | Dual storage | **+resilience** |
+| MCP Server | ~800 lines (5 dirs) | 650 lines (2 files) | **81%** |
+| MCP Client | ~250 lines | ~254 lines (with fallback) | Same |
+| Tool Wrapper | ~200 lines | 0 (deleted) | **100%** |
+| Total MCP Code | ~1250 lines | ~900 lines | **28%** |
+
+### Files Structure (After Migration)
+
+```
+mcp-server/src/
+├── server.py     # FastMCP @mcp.tool decorated functions (272 lines)
+├── app.py        # FastAPI JSON-RPC wrapper (348 lines)
+├── config.py     # Configuration (30 lines)
+└── __init__.py
+
+app/mcp/
+├── client.py     # langchain-mcp-adapters with fallback (254 lines)
+└── __init__.py
+
+app/agent/
+├── graph.py      # LangGraph state machine (710 lines)
+├── nodes.py      # LangGraph node functions (442 lines)
+├── state.py      # TypedDict state schema (105 lines)
+├── checkpointer.py # Checkpointing helpers (374 lines)
+└── ai_service.py # AI service wrapper (652 lines)
+```
 
 ---
 

@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # Import the FastMCP server with tools
-from .server_new import mcp, BACKEND_URL
+from .server import mcp, BACKEND_URL
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -97,23 +97,23 @@ async def health_check():
 @app.get("/tools")
 async def list_tools():
     """List all available MCP tools."""
+    tools_list = await mcp.list_tools()
     tools = []
-    for name, tool in mcp._tools.items():
-        # Get schema, filtering out 'ctx' parameter
-        schema = {}
+    for tool in tools_list:
+        # Get schema from parameters dict, filtering out auth_token
+        schema = {"type": "object", "properties": {}}
         if tool.parameters:
-            full_schema = tool.parameters.model_json_schema()
-            props = full_schema.get("properties", {})
-            # Remove 'ctx' from properties as it's injected by FastMCP
-            props = {k: v for k, v in props.items() if k != "ctx"}
-            required = [r for r in full_schema.get("required", []) if r != "ctx"]
+            props = tool.parameters.get("properties", {})
+            # Remove 'auth_token' from properties as it's injected by wrapper
+            props = {k: v for k, v in props.items() if k != "auth_token"}
+            required = [r for r in tool.parameters.get("required", []) if r != "auth_token"]
             schema = {"type": "object", "properties": props}
             if required:
                 schema["required"] = required
         
         tools.append({
-            "name": name,
-            "description": tool.description or f"Execute {name}",
+            "name": tool.name,
+            "description": tool.description or f"Execute {tool.name}",
             "inputSchema": schema
         })
     return {"tools": tools}
@@ -206,22 +206,27 @@ async def handle_message(
             if not tool_name:
                 raise ValueError("Missing tool name")
             
-            # Get the tool from FastMCP
-            tool = mcp._tools.get(tool_name)
+            # Get tool to check it exists
+            tool = await mcp.get_tool(tool_name)
             if not tool:
                 raise ValueError(f"Unknown tool: {tool_name}")
             
-            # Create mock context with token for authorization
-            ctx = MockContext(token)
+            # Add token to arguments for authorization
+            arguments_with_token = {**arguments, "auth_token": token}
             
-            # Execute the tool with context
-            tool_result = await tool.fn(ctx=ctx, **arguments)
+            # Call tool via FastMCP
+            tool_result = await mcp.call_tool(tool_name, arguments_with_token)
             
-            result = {
-                "content": [
-                    {"type": "text", "text": json.dumps(tool_result)}
-                ]
-            }
+            # Extract content from result
+            content = []
+            if tool_result.content:
+                for item in tool_result.content:
+                    if hasattr(item, 'text'):
+                        content.append({"type": "text", "text": item.text})
+                    else:
+                        content.append({"type": "text", "text": str(item)})
+            
+            result = {"content": content}
                 
         elif method == "resources/list":
             result = {"resources": []}
