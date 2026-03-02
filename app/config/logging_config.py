@@ -169,12 +169,32 @@ class LogContext:
         self._log(logging.ERROR, msg, data, **kwargs)
     
     def ai_request(self, prompt: str, model: str = "gemini"):
-        """Log AI request - full prompt without truncation."""
-        self.info(f"🤖 AI Request to {model}", data={"prompt": prompt})
+        """Log AI request - full prompt with grepable prefix."""
+        # Print with grepable prefix for easy filtering
+        print(f"\n[AI_PROMPT] ========== AI REQUEST START ==========")
+        print(f"[AI_PROMPT] Model: {model}")
+        print(f"[AI_PROMPT] Session: {self.context.get('session_id', 'N/A')}")
+        print(f"[AI_PROMPT] Timestamp: {__import__('datetime').datetime.now().isoformat()}")
+        print(f"[AI_PROMPT] --- PROMPT BEGIN ---")
+        for line in prompt.split('\n'):
+            print(f"[AI_PROMPT] {line}")
+        print(f"[AI_PROMPT] --- PROMPT END ---")
+        print(f"[AI_PROMPT] ========== AI REQUEST END ==========\n")
+        self.info(f"🤖 AI Request to {model}", data={"prompt_length": len(prompt)})
     
     def ai_response(self, response: str, duration_ms: int):
-        """Log AI response - full response without truncation."""
-        self.info(f"✅ AI Response received", data={"response": response}, duration_ms=duration_ms)
+        """Log AI response - full response with grepable prefix."""
+        # Print with grepable prefix for easy filtering
+        print(f"\n[AI_RESPONSE] ========== AI RESPONSE START ==========")
+        print(f"[AI_RESPONSE] Duration: {duration_ms}ms")
+        print(f"[AI_RESPONSE] Session: {self.context.get('session_id', 'N/A')}")
+        print(f"[AI_RESPONSE] Timestamp: {__import__('datetime').datetime.now().isoformat()}")
+        print(f"[AI_RESPONSE] --- RESPONSE BEGIN ---")
+        for line in response.split('\n'):
+            print(f"[AI_RESPONSE] {line}")
+        print(f"[AI_RESPONSE] --- RESPONSE END ---")
+        print(f"[AI_RESPONSE] ========== AI RESPONSE END ==========\n")
+        self.info(f"✅ AI Response received", data={"response_length": len(response)}, duration_ms=duration_ms)
     
     def agent_start(self, agent_name: str, task: str):
         """Log agent starting."""
