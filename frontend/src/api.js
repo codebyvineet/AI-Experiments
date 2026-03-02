@@ -111,8 +111,11 @@ export const api = {
     return data.sessions || [];
   },
 
-  async deleteSession(token, sessionId) {
-    const res = await fetch(`${API_BASE}/stream/sessions/${sessionId}`, {
+  async deleteSession(token, sessionId, permanent = false) {
+    const url = permanent 
+      ? `${API_BASE}/stream/sessions/${sessionId}?permanent=true`
+      : `${API_BASE}/stream/sessions/${sessionId}`;
+    const res = await fetch(url, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${token}` }
     });

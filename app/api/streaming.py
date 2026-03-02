@@ -346,17 +346,20 @@ async def resume_session(
 @router.delete("/sessions/{session_id}")
 async def delete_session(
     session_id: str,
+    permanent: bool = False,
     current_user: TokenData = Depends(get_current_user)
 ):
     """
     Delete/cancel a session.
     
-    Useful for cleaning up stuck or unwanted sessions.
+    Args:
+        permanent: If True, permanently deletes the session from the database.
+                  If False (default), just marks it as cancelled.
     """
     request_id = str(uuid.uuid4())[:8]
     log = LogContext(logger, request_id=request_id, session_id=session_id, user_id=current_user.user_id)
     
-    log.info("📥 Request: Delete session")
+    log.info(f"📥 Request: Delete session (permanent={permanent})")
     
     orchestrator = await get_orchestrator()
     
@@ -368,24 +371,43 @@ async def delete_session(
     if state.get("user_id") != current_user.user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
-    # Mark as cancelled in the state
-    # We use aupdate_state with the "summary" node which leads to END
-    # This marks the session as complete/cancelled
-    config = {"configurable": {"thread_id": session_id}}
-    try:
-        await orchestrator._graph.aupdate_state(
-            config,
-            {"status": "cancelled", "final_result": "Session cancelled by user"},
-            as_node="summary"
-        )
-    except Exception as e:
-        # If update fails (e.g., graph structure doesn't allow it),
-        # just log it - the session is effectively abandoned
-        log.warning(f"Could not update state (session may be orphaned): {e}")
-    
-    log.info("📤 Response: Session deleted/cancelled")
-    
-    return {"message": "Session cancelled", "session_id": session_id}
+    if permanent:
+        # Permanently delete from MongoDB
+        from app.checkpoints import get_mongodb
+        db = await get_mongodb()
+        
+        # Delete from checkpoints collection
+        result1 = await db.checkpoints.delete_many({"thread_id": session_id})
+        # Delete from checkpoint_writes collection
+        result2 = await db.checkpoint_writes.delete_many({"thread_id": session_id})
+        
+        log.info(f"📤 Response: Session permanently deleted (checkpoints: {result1.deleted_count}, writes: {result2.deleted_count})")
+        
+        return {
+            "message": "Session permanently deleted",
+            "session_id": session_id,
+            "deleted_checkpoints": result1.deleted_count,
+            "deleted_writes": result2.deleted_count
+        }
+    else:
+        # Mark as cancelled in the state
+        # We use aupdate_state with the "summary" node which leads to END
+        # This marks the session as complete/cancelled
+        config = {"configurable": {"thread_id": session_id}}
+        try:
+            await orchestrator._graph.aupdate_state(
+                config,
+                {"status": "cancelled", "final_result": "Session cancelled by user"},
+                as_node="summary"
+            )
+        except Exception as e:
+            # If update fails (e.g., graph structure doesn't allow it),
+            # just log it - the session is effectively abandoned
+            log.warning(f"Could not update state (session may be orphaned): {e}")
+        
+        log.info("📤 Response: Session cancelled")
+        
+        return {"message": "Session cancelled", "session_id": session_id}
 
 
 class MessageRequest(BaseModel):

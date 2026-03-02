@@ -294,7 +294,7 @@ export default function AgentPanel({ token, user }) {
     if (!confirm('Cancel this session? This cannot be undone.')) return;
     
     try {
-      await api.deleteSession(token, sid);
+      await api.deleteSession(token, sid, false);
       addEvent({ type: 'status', message: `Session ${sid.slice(0, 8)} cancelled` });
       
       // If we cancelled the current session, clear state
@@ -305,6 +305,24 @@ export default function AgentPanel({ token, user }) {
       refreshSessions();
     } catch (err) {
       addEvent({ type: 'error', error: `Failed to cancel session: ${err.message}` });
+    }
+  };
+
+  const handleDeleteSession = async (sid) => {
+    if (!confirm('Permanently delete this session? This cannot be undone and all data will be lost.')) return;
+    
+    try {
+      await api.deleteSession(token, sid, true);
+      addEvent({ type: 'status', message: `Session ${sid.slice(0, 8)} permanently deleted` });
+      
+      // If we deleted the current session, clear state
+      if (sid === sessionId) {
+        handleNewSession();
+      }
+      
+      refreshSessions();
+    } catch (err) {
+      addEvent({ type: 'error', error: `Failed to delete session: ${err.message}` });
     }
   };
 
@@ -416,6 +434,16 @@ export default function AgentPanel({ token, user }) {
                         title="Cancel stuck session"
                       >
                         ✕
+                      </button>
+                    )}
+                    {/* Delete button for non-executing sessions */}
+                    {s.status !== 'executing' && s.status !== 'planning' && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleDeleteSession(s.session_id); }}
+                        className="px-1 py-0.5 text-gray-400 hover:text-red-400 hover:bg-red-900/30 rounded"
+                        title="Delete session permanently"
+                      >
+                        🗑️
                       </button>
                     )}
                   </div>
