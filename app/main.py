@@ -5,7 +5,7 @@ import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.config import get_settings
 from app.config.logging_config import setup_logging, get_logger, LogContext
@@ -21,43 +21,51 @@ logger = get_logger("main")
 settings = get_settings()
 
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    """Middleware to log all incoming requests and responses."""
+class RequestLoggingMiddleware:
+    """Pure ASGI middleware for request logging.
     
-    async def dispatch(self, request: Request, call_next):
+    Unlike BaseHTTPMiddleware, this does NOT hold the response body open
+    for streaming responses (SSE), so it won't block concurrent requests.
+    """
+    
+    def __init__(self, app: ASGIApp):
+        self.app = app
+    
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        
         request_id = str(uuid.uuid4())[:8]
         start_time = time.time()
         
-        # Extract user info if available
-        user_info = "anonymous"
-        if "authorization" in request.headers:
-            user_info = "authenticated"
+        path = scope.get("path", "")
+        method = scope.get("method", "")
         
         log = LogContext(logger, request_id=request_id)
+        log.info(f"📥 {method} {path}")
         
-        # Log request
-        log.info(f"📥 {request.method} {request.url.path}", data={
-            "query_params": dict(request.query_params),
-            "user": user_info,
-            "client": request.client.host if request.client else "unknown"
-        })
+        # Wrap send to capture status code and add headers
+        response_started = False
+        status_code = 0
         
-        # Process request
-        response = await call_next(request)
+        async def send_wrapper(message):
+            nonlocal response_started, status_code
+            if message["type"] == "http.response.start":
+                response_started = True
+                status_code = message.get("status", 0)
+                # Add request ID header
+                headers = list(message.get("headers", []))
+                headers.append((b"x-request-id", request_id.encode()))
+                message = {**message, "headers": headers}
+                
+                duration_ms = int((time.time() - start_time) * 1000)
+                emoji = "✅" if status_code < 400 else "❌"
+                log.info(f"{emoji} Response {status_code}", duration_ms=duration_ms)
+            
+            await send(message)
         
-        # Calculate duration
-        duration_ms = int((time.time() - start_time) * 1000)
-        
-        # Log response
-        status_emoji = "✅" if response.status_code < 400 else "❌"
-        log.info(f"{status_emoji} Response {response.status_code}", data={
-            "status_code": response.status_code
-        }, duration_ms=duration_ms)
-        
-        # Add request ID to response headers
-        response.headers["X-Request-ID"] = request_id
-        
-        return response
+        await self.app(scope, receive, send_wrapper)
 
 
 @asynccontextmanager
@@ -110,9 +118,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add request logging middleware
-app.add_middleware(RequestLoggingMiddleware)
-
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -121,6 +126,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add request logging middleware (ASGI-native, doesn't block SSE streams)
+app.add_middleware(RequestLoggingMiddleware)
 
 # Include routers
 app.include_router(auth_router)

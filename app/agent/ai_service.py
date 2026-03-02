@@ -144,14 +144,19 @@ class AIService:
         for i, result in enumerate(previous_results):
             task_name = result.get("task_name", f"Task {i+1}")
             status = result.get("status", "unknown")
-            output = result.get("output_data", {})
-            result_text = result.get("result", "")
+            tool = result.get("tool", "")
+            result_data = result.get("result", "")
+            
+            # Handle both string and dict results
+            if isinstance(result_data, dict):
+                result_text = json.dumps(result_data, indent=2, default=str)
+            else:
+                result_text = str(result_data) if result_data else "N/A"
             
             formatted.append(f"""
-### Result {i+1}: {task_name}
+### Result {i+1}: {task_name} (tool: {tool or 'AI'})
 - Status: {status}
-- Result: {result_text}
-- Output Data: {json.dumps(output, indent=2) if output else 'N/A'}
+- Data: {result_text[:2000]}
 """)
         
         return "\n".join(formatted)
@@ -177,8 +182,8 @@ class AIService:
         # NOTE: We do NOT pass permissions to AI - authorization happens at MCP tool execution level
         # The AI should create plans freely; the MCP server enforces permissions when tools are called
         
-        # Build the planning prompt with MCP tools only
-        prompt = f"""You are a planning agent for an AI-powered system. Create a detailed execution plan for the following goal.
+        # Build the planning prompt - complexity-aware, minimal steps
+        prompt = f"""You are a planning agent for an AI-powered system with MCP tools for database operations.
 
 {system_tools}
 
@@ -190,47 +195,62 @@ GOAL: {goal}
 
 {"CONTEXT: " + json.dumps(context) if context else ""}
 
-Create a JSON plan that uses the MCP tools available in this system. The plan should reference specific MCP tools (like create_item, read_item, list_items, search_items, etc.).
+Create a JSON execution plan using the available MCP tools.
 
-IMPORTANT: Do NOT worry about user permissions. Just create the best plan to accomplish the goal. Authorization is handled automatically by the MCP server when tools are executed.
+## CRITICAL RULES - Read Carefully
+
+1. **KEEP IT SIMPLE**: Match plan complexity to the goal:
+   - Simple lookups/queries → 1 step, 1-2 sub-tasks (e.g., search_items + return results)
+   - CRUD operations → 1-2 steps (e.g., create/update item, then verify)
+   - Complex multi-entity workflows → 2-4 steps maximum
+   
+2. **USE SEQUENTIAL MODE BY DEFAULT**: Only use "parallel" when sub-tasks are truly independent AND don't need each other's results.
+
+3. **EACH SUB-TASK MUST HAVE A TOOL**: Every sub-task should call a specific MCP tool. Do NOT create sub-tasks that just "analyze" or "consolidate" data without a tool — that happens automatically.
+
+4. **USE REAL VALUES**: For tool_params, use actual values from the user's goal. Do NOT use placeholders like "from_previous_step" — each tool call must be self-contained.
+
+5. **NO VALIDATION STEPS**: Do not add validation/verification steps unless the user specifically asks for verification. The MCP tools return results directly.
+
+6. **RESULTS PASS AUTOMATICALLY**: Each step receives all results from previous steps. You do not need extra steps to "pass data" or "consolidate results."
 
 Response format:
 {{
-    "analysis": "Brief analysis of the goal and which MCP tools will be needed",
+    "analysis": "Brief analysis: what the user wants and which tool(s) to use",
     "steps": [
         {{
-            "phase": "research|analysis|execution|data_operations|validation",
+            "phase": "research|execution|data_operations",
             "description": "What this step does",
-            "agent_type": "research|execution|validation",
-            "execution_mode": "parallel|sequential",
+            "agent_type": "research|execution",
+            "execution_mode": "sequential",
             "sub_tasks": [
                 {{
-                    "name": "Task name",
-                    "description": "Task details",
-                    "tool": "MCP tool name to use (if applicable)",
-                    "tool_params": {{}}  // Parameters for the tool if applicable
+                    "name": "Descriptive task name",
+                    "description": "What this sub-task does",
+                    "tool": "MCP tool name",
+                    "tool_params": {{}}
                 }}
             ],
             "reasoning": "Why this step is needed",
-            "mcp_tools_used": ["list of MCP tool names used in this step"]
+            "mcp_tools_used": ["tool_names"]
         }}
     ],
-    "mcp_tools_summary": ["all MCP tools that will be used across the plan"],
-    "estimated_complexity": "low|medium|high",
-    "potential_challenges": ["challenge1", "challenge2"]
+    "estimated_complexity": "low|medium|high"
 }}
 
-Important rules:
-1. ONLY use MCP tools (create_item, read_item, update_item, delete_item, list_items, search_items, bulk_create, bulk_delete, get_statistics, generate_report, get_user_profile)
-2. Research tasks can run in parallel when they don't depend on each other
-3. Data operations that modify the database should be sequential
-4. Validation should always be the final step
-5. Include 3-6 steps depending on complexity
-6. Each step should have 2-4 sub-tasks
-7. Be specific about which MCP tools each task will use
-8. Do NOT check or mention user permissions - just plan the best approach
-9. Do NOT use template syntax like {{{{steps[x].output}}}} - each task receives previous results automatically via context
-10. For tool_params, use actual values from the user's request, NOT placeholders or references to other steps
+## Examples
+
+**Simple query "find items about X":**
+→ 1 step: search_items with query="X"
+
+**"Create an item called Y":**
+→ 1 step: create_item with name="Y"
+
+**"List all items and get statistics":**
+→ 1 step with 2 sequential sub-tasks: list_items, then get_statistics
+
+**"Search for X, then update its description":**
+→ 2 steps: (1) search_items for X, (2) update_item with results
 
 Respond ONLY with valid JSON, no markdown or explanation.
 """
@@ -436,38 +456,26 @@ Parameters: {json.dumps(task_tool_params)}
 This is an informational task. The MCP tool will be executed separately.
 """
         
-        prompt = f"""You are an execution agent performing a specific task in a system with MCP tools.
-
-{get_system_tools_description()}
-
----
+        prompt = f"""You are an execution agent. Perform the task below using the provided context and previous results.
 
 TASK: {task_name}
 DESCRIPTION: {task_description}
 
 {tool_context}
 
-STEP CONTEXT:
-- Phase: {step_info.get('phase', 'unknown')}
-- Agent Type: {step_info.get('agent_type', 'execution')}
-- Step Description: {step_info.get('description', '')}
-- MCP Tools for this step: {mcp_tools_used}
-
 ## PREVIOUS TASK RESULTS (USE THIS DATA!)
 {self._format_previous_results(context.get('previous_results', []))}
 
-ADDITIONAL CONTEXT:
-Goal: {context.get('goal', '')}
-Tool: {context.get('tool', 'N/A')}
-Tool Params: {json.dumps(context.get('tool_params', {}))}
+GOAL: {context.get('goal', '')}
 
-Execute this task and provide a structured result:
+Execute this task based on the data above. If previous results contain the answer, use it directly.
+
+Respond with JSON:
 {{
     "status": "success|partial|failed",
-    "result": "Description of what was accomplished",
+    "result": "Description of what was accomplished or the answer",
     "output_data": {{}},
-    "notes": "Any observations or recommendations",
-    "next_actions": []
+    "notes": "Any observations"
 }}
 
 Respond ONLY with valid JSON.

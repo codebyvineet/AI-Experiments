@@ -178,6 +178,8 @@ def create_task_sends(state: AgentState) -> List[Send]:
     
     This is used as a conditional edge function that returns
     Send() objects to spawn parallel task executors.
+    
+    Includes previous step results so tasks have context from earlier steps.
     """
     plan = state.get("plan", [])
     current_step = state.get("current_step", 0)
@@ -191,6 +193,17 @@ def create_task_sends(state: AgentState) -> List[Send]:
     if not sub_tasks:
         return []
     
+    # Collect previous results for context passing between steps
+    previous_results = [
+        {
+            "task_name": r.get("task_name", ""),
+            "status": r.get("status", ""),
+            "result": r.get("result"),
+            "tool": r.get("tool", "")
+        }
+        for r in state.get("results", [])
+    ]
+    
     # Create Send() for each task
     return [
         Send("task_executor", {
@@ -200,7 +213,8 @@ def create_task_sends(state: AgentState) -> List[Send]:
             "task_index": i,
             "task": task,
             "goal": state["goal"],
-            "step_description": step.get("description", "")
+            "step_description": step.get("description", ""),
+            "previous_results": previous_results
         })
         for i, task in enumerate(sub_tasks)
     ]
@@ -277,7 +291,8 @@ async def task_executor_node(task_state: Dict[str, Any]) -> Dict[str, Any]:
                     "goal": task_state["goal"],
                     "step": task_state["step_description"],
                     "tool": None,
-                    "tool_params": {}
+                    "tool_params": {},
+                    "previous_results": task_state.get("previous_results", [])
                 },
                 session_id=session_id,
                 step_info={"description": task_state["step_description"]},

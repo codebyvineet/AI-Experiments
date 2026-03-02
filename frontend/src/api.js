@@ -21,38 +21,47 @@ export const api = {
   },
 
   async getMe(token) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
-    
-    try {
-      const res = await fetch(`${API_BASE}/auth/me`, {
-        headers: { 'Authorization': `Bearer ${token}` },
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
+    // Retry with backoff to handle cases where backend is busy with SSE streams
+    const maxRetries = 2;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const controller = new AbortController();
+      const timeout = attempt === 0 ? 8000 : 12000; // 8s first, 12s retry
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
       
-      if (res.status === 401 || res.status === 403) {
-        const error = new Error('Unauthorized');
-        error.isAuthError = true;
+      try {
+        const res = await fetch(`${API_BASE}/auth/me`, {
+          headers: { 'Authorization': `Bearer ${token}` },
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        
+        if (res.status === 401 || res.status === 403) {
+          const error = new Error('Unauthorized');
+          error.isAuthError = true;
+          throw error;
+        }
+        
+        const data = await res.json();
+        return {
+          ...data,
+          id: data.user_id || data.id,
+          role: data.role || 'user'
+        };
+      } catch (err) {
+        clearTimeout(timeoutId);
+        // Auth errors should not be retried
+        if (err.isAuthError) {
+          throw err;
+        }
+        // Retry on network/timeout errors
+        if (attempt < maxRetries) {
+          await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); // backoff
+          continue;
+        }
+        const error = new Error(err.name === 'AbortError' ? 'Request timeout' : err.message);
+        error.isNetworkError = true;
         throw error;
       }
-      
-      const data = await res.json();
-      return {
-        ...data,
-        id: data.user_id || data.id,
-        role: data.role || 'user'
-      };
-    } catch (err) {
-      clearTimeout(timeoutId);
-      // Only mark as auth error if it's an actual auth failure
-      if (err.isAuthError) {
-        throw err;
-      }
-      // For timeouts/network errors, throw a different error
-      const error = new Error(err.name === 'AbortError' ? 'Request timeout' : err.message);
-      error.isNetworkError = true;
-      throw error;
     }
   },
 

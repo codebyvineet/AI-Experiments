@@ -22,15 +22,21 @@ function App() {
           setIsLoading(false);
         })
         .catch((err) => {
-          // Only clear token on actual auth errors, not network/timeout errors
           if (err.isAuthError) {
+            // Genuine auth failure - clear token
             setToken('');
             localStorage.removeItem('token');
+            setIsLoading(false);
           } else {
-            // Network error - keep trying
-            console.warn('Network error verifying token:', err.message);
+            // Network/timeout error - keep token, retry after delay
+            console.warn('Network error verifying token, will retry:', err.message);
+            const retryTimer = setTimeout(() => {
+              api.getMe(token)
+                .then(userData => { setUser(userData); setIsLoading(false); })
+                .catch(() => { setIsLoading(false); }); // Give up after second attempt
+            }, 3000);
+            return () => clearTimeout(retryTimer);
           }
-          setIsLoading(false);
         });
     } else {
       setIsLoading(false);

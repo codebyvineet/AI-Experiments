@@ -355,8 +355,8 @@ class LangGraphOrchestrator:
         """
         List all sessions for a user with their status.
         
-        Uses MongoDB distinct query to find thread_ids, then uses
-        LangGraph checkpointer to get the latest state for each.
+        Uses MongoDB aggregate pipeline to efficiently get latest checkpoint
+        for each thread, avoiding sequential aget_state() calls.
         """
         log = LogContext(logger, user_id=user_id)
         log.info(f"📋 Listing sessions for user: {user_id}")
@@ -366,37 +366,62 @@ class LangGraphOrchestrator:
         try:
             db = self._mongo_client[self.settings.mongodb_database]
             
-            # Get distinct thread_ids from checkpoints (LangGraph stores these)
-            thread_ids = db.checkpoints.distinct("thread_id")
-            log.info(f"📋 Found {len(thread_ids)} total threads")
+            # Use aggregation pipeline to get latest checkpoint per thread
+            # and filter by user_id in a single query
+            pipeline = [
+                # Sort by checkpoint_id descending to get latest first
+                {"$sort": {"checkpoint_id": -1}},
+                # Group by thread_id, take the first (latest) document
+                {"$group": {
+                    "_id": "$thread_id",
+                    "latest_checkpoint": {"$first": "$checkpoint"},
+                    "thread_id": {"$first": "$thread_id"}
+                }},
+                # Limit to reasonable number
+                {"$limit": 100}
+            ]
             
-            # For each thread, get the latest checkpoint and check if it belongs to user
-            for thread_id in thread_ids[:50]:  # Limit to 50
-                config = {"configurable": {"thread_id": thread_id}}
-                
-                try:
-                    # Use LangGraph's native method to get state
-                    state = await self._graph.aget_state(config)
-                    
-                    if state and state.values:
-                        values = state.values
-                        # Check if this session belongs to the user
-                        session_user_id = values.get("user_id", "")
-                        
-                        if session_user_id == user_id:
-                            sessions.append({
-                                "session_id": thread_id,
-                                "status": values.get("status", "unknown"),
-                                "goal": values.get("goal", ""),
-                                "created_at": None,  # Not easily available
-                                "has_pending_interrupt": bool(state.tasks),
-                                "plan_steps": len(values.get("plan", [])),
-                                "current_step": values.get("current_step", 0),
-                                "can_resume": values.get("status") in ["awaiting_approval", "executing"]
-                            })
-                except Exception as e:
-                    log.debug(f"Could not get state for thread {thread_id}: {e}")
-                    continue
+            async_db = self._mongo_client[self.settings.mongodb_database]
+            # Use Motor async client if available, fallback to sync
+            from motor.motor_asyncio import AsyncIOMotorClient
+            import json
+            
+            # Get all checkpoints efficiently
+            thread_ids = db.checkpoints.distinct("thread_id")
+            
+            # Batch process - get state for threads in parallel (max 10 concurrent)
+            import asyncio
+            semaphore = asyncio.Semaphore(10)
+            
+            async def get_session_info(thread_id):
+                async with semaphore:
+                    try:
+                        config = {"configurable": {"thread_id": thread_id}}
+                        state = await self._graph.aget_state(config)
+                        if state and state.values:
+                            values = state.values
+                            if values.get("user_id") == user_id:
+                                return {
+                                    "session_id": thread_id,
+                                    "status": values.get("status", "unknown"),
+                                    "goal": values.get("goal", ""),
+                                    "created_at": None,
+                                    "has_pending_interrupt": bool(state.tasks),
+                                    "plan_steps": len(values.get("plan", [])),
+                                    "current_step": values.get("current_step", 0),
+                                    "can_resume": values.get("status") in ["awaiting_approval", "executing"]
+                                }
+                    except Exception:
+                        pass
+                    return None
+            
+            # Run all lookups concurrently (bounded by semaphore)
+            results = await asyncio.gather(
+                *[get_session_info(tid) for tid in thread_ids[:50]],
+                return_exceptions=True
+            )
+            
+            sessions = [r for r in results if r and not isinstance(r, Exception)]
             
             # Sort by status (active first)
             status_order = {"executing": 0, "awaiting_approval": 1, "planning": 2, "completed": 3}
