@@ -372,12 +372,12 @@ class MultiAgentOrchestrator:
             # Execute based on mode using real AI
             task_results = []
             if step.get("execution_mode") == "parallel":
-                async for update in self._execute_parallel_tasks_ai(step, session_id, session.goal, session):
+                async for update in self._execute_parallel_tasks_ai(step, session_id, session.goal, session, step_results):
                     if update.get("type") == "task_complete" and "result" in update:
                         task_results.append(update.get("result", {}))
                     yield update
             else:
-                async for update in self._execute_sequential_tasks_ai(step, session_id, session.goal, session):
+                async for update in self._execute_sequential_tasks_ai(step, session_id, session.goal, session, step_results):
                     if update.get("type") == "task_complete" and "result" in update:
                         task_results.append(update.get("result", {}))
                     yield update
@@ -438,16 +438,25 @@ class MultiAgentOrchestrator:
         step: Dict[str, Any],
         session_id: str,
         goal: str,
-        session: MultiAgentSession
+        session: MultiAgentSession,
+        prior_step_results: List[Dict[str, Any]] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Execute sub-tasks in parallel using real AI."""
         log = LogContext(logger, session_id=session_id, phase=step.get("phase", "unknown"))
         
         sub_tasks = step.get("sub_tasks", [])
+        prior_step_results = prior_step_results or []
+        
+        # Collect results from prior steps
+        all_prior_results = []
+        for prior_step in prior_step_results:
+            for task_result in prior_step.get("task_results", []):
+                all_prior_results.append(task_result)
         
         log.info(f"⚡ Starting parallel execution", data={
             "step": step["description"],
-            "task_count": len(sub_tasks)
+            "task_count": len(sub_tasks),
+            "prior_results": len(all_prior_results)
         })
         
         yield {
@@ -470,6 +479,7 @@ class MultiAgentOrchestrator:
                 context={
                     "goal": goal, 
                     "step": step["description"],
+                    "previous_results": all_prior_results[-5:] if all_prior_results else [],
                     "tool": task.get("tool"),
                     "tool_params": task.get("tool_params", {})
                 },
@@ -521,19 +531,29 @@ class MultiAgentOrchestrator:
         step: Dict[str, Any],
         session_id: str,
         goal: str,
-        session: MultiAgentSession
+        session: MultiAgentSession,
+        prior_step_results: List[Dict[str, Any]] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Execute sub-tasks sequentially using real AI."""
         log = LogContext(logger, session_id=session_id, phase=step.get("phase", "unknown"))
         
         sub_tasks = step.get("sub_tasks", [])
+        prior_step_results = prior_step_results or []
         
         log.info(f"📋 Starting sequential execution", data={
             "step": step["description"],
-            "task_count": len(sub_tasks)
+            "task_count": len(sub_tasks),
+            "prior_steps": len(prior_step_results)
         })
         
-        previous_results = []
+        # Collect results from prior steps to pass as context
+        all_prior_results = []
+        for prior_step in prior_step_results:
+            for task_result in prior_step.get("task_results", []):
+                all_prior_results.append(task_result)
+        
+        # Start with results from prior steps
+        previous_results = all_prior_results[-5:] if all_prior_results else []
         
         for i, task in enumerate(sub_tasks):
             task_start = time.time()
