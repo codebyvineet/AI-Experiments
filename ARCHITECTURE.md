@@ -2,6 +2,50 @@
 
 This document describes the architecture of the AI Experiments MCP Demo Application.
 
+## Quick Reference
+
+| Component | Port | Technology | Purpose |
+|-----------|------|------------|---------|
+| Frontend | 3000 | React + Vite | User interface |
+| Backend | 8000 | FastAPI | API server, AI orchestration |
+| MCP Server | 8001 | Python + MCP SDK | Tool execution via MCP protocol |
+| MongoDB | 27017 | MongoDB | Hot state storage |
+| Redis | 6379 | Redis | Cold state cache |
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `app/agent/ai_service.py` | Vertex AI integration, plan generation |
+| `app/agent/multi_agent.py` | Plan execution orchestration |
+| `app/auth/authorization.py` | RBAC permission definitions |
+| `mcp-server/src/tools/item_tools.py` | MCP tool implementations |
+| `frontend/src/components/AgentPanel.jsx` | AI agent UI |
+
+### RBAC Roles
+
+| Role | Permissions | Use Case |
+|------|-------------|----------|
+| `admin` | Full access (`*:*`) | System administrators |
+| `user` | CRUD items, run agent | Regular users |
+| `read_only` | View only | Viewers, auditors |
+
+### Demo Users
+
+```
+admin_demo@test.com / admin123   → Full access
+user_demo@test.com / user123     → CRUD items
+viewer_demo@test.com / viewer123 → Read only
+```
+
+### Logging (Grepable)
+
+```bash
+docker logs ai-experiments-app-1 | grep "\[AIFLOW\]"
+```
+
+---
+
 ## High-Level Architecture
 
 ```
