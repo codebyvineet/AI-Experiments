@@ -183,8 +183,15 @@ export default function AgentPanel({ token, user }) {
       setSessionId(session.session_id);
       addEvent({ type: 'session_created', session_id: session.session_id });
       
+      // Immediately add the new session to the list with planning status
+      setPreviousSessions(prev => [{
+        session_id: session.session_id,
+        goal: goal,
+        status: 'planning'
+      }, ...prev]);
+      
       await streamSSE(`/stream/sessions/${session.session_id}/plan`);
-      refreshSessions(); // Update sessions list
+      refreshSessions(); // Update sessions list with final status
     } catch (err) {
       addEvent({ type: 'error', error: err.message });
       setStatus('idle');
