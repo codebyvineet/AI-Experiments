@@ -1,18 +1,19 @@
-"""MongoDB hot state checkpoint storage."""
+"""MongoDB database connection management.
 
-from typing import Optional, Dict, Any, List
-from datetime import datetime, timezone
+This module provides the MongoDB connection for the application.
+Agent checkpointing is handled by LangGraph (see app/agent/checkpointer.py).
+"""
+
+from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from bson import ObjectId
 
 from app.config import get_settings
-from app.models import AgentState
 
 settings = get_settings()
 
 
-class MongoDBCheckpoint:
-    """MongoDB checkpoint manager for hot state storage."""
+class MongoDBConnection:
+    """MongoDB connection manager."""
     
     def __init__(self):
         self.client: Optional[AsyncIOMotorClient] = None
@@ -23,9 +24,7 @@ class MongoDBCheckpoint:
         self.client = AsyncIOMotorClient(settings.mongodb_url)
         self.db = self.client[settings.mongodb_database]
         
-        # Create indexes
-        await self.db.checkpoints.create_index("session_id", unique=True)
-        await self.db.checkpoints.create_index("user_id")
+        # Create indexes for application data
         await self.db.users.create_index("username", unique=True)
         await self.db.users.create_index("email", unique=True)
         await self.db.items.create_index("owner_id")
@@ -34,49 +33,11 @@ class MongoDBCheckpoint:
         """Disconnect from MongoDB."""
         if self.client:
             self.client.close()
-    
-    async def save_checkpoint(self, state: AgentState) -> str:
-        """Save agent state checkpoint (hot storage)."""
-        state_dict = state.model_dump(exclude={"id"})
-        state_dict["updated_at"] = datetime.now(timezone.utc)
-        
-        result = await self.db.checkpoints.update_one(
-            {"session_id": state.session_id},
-            {"$set": state_dict},
-            upsert=True
-        )
-        
-        if result.upserted_id:
-            return str(result.upserted_id)
-        
-        doc = await self.db.checkpoints.find_one({"session_id": state.session_id})
-        return str(doc["_id"]) if doc else ""
-    
-    async def get_checkpoint(self, session_id: str) -> Optional[AgentState]:
-        """Get agent state checkpoint by session ID."""
-        doc = await self.db.checkpoints.find_one({"session_id": session_id})
-        if doc:
-            doc["id"] = str(doc.pop("_id"))
-            return AgentState(**doc)
-        return None
-    
-    async def delete_checkpoint(self, session_id: str) -> bool:
-        """Delete agent state checkpoint."""
-        result = await self.db.checkpoints.delete_one({"session_id": session_id})
-        return result.deleted_count > 0
-    
-    async def list_checkpoints(self, user_id: str) -> List[AgentState]:
-        """List all checkpoints for a user."""
-        cursor = self.db.checkpoints.find({"user_id": user_id})
-        checkpoints = []
-        async for doc in cursor:
-            doc["id"] = str(doc.pop("_id"))
-            checkpoints.append(AgentState(**doc))
-        return checkpoints
 
 
-# Global instance
-mongodb_checkpoint = MongoDBCheckpoint()
+# Global instance - provides database connection
+# Note: Agent checkpointing uses LangGraph's AsyncMongoDBSaver
+mongodb_checkpoint = MongoDBConnection()
 
 
 async def get_mongodb() -> AsyncIOMotorDatabase:

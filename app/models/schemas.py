@@ -88,18 +88,8 @@ class ItemUpdate(BaseModel):
     data: Optional[Dict[str, Any]] = None
 
 
-class AgentState(BaseModel):
-    """Agent state model for checkpointing."""
-    id: Optional[str] = None
-    session_id: str
-    user_id: str
-    state_type: str = "hot"  # "hot" for MongoDB, "cold" for Redis
-    state_data: Dict[str, Any] = Field(default_factory=dict)
-    plan: Optional[List[Dict[str, Any]]] = None
-    current_step: int = 0
-    is_complete: bool = False
-    created_at: datetime = Field(default_factory=utcnow)
-    updated_at: datetime = Field(default_factory=utcnow)
+# Note: Agent state is managed by LangGraph (see app/agent/state.py)
+# LangGraph checkpointers handle persistence automatically.
 
 
 class MCPRequest(BaseModel):

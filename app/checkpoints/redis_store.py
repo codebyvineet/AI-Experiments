@@ -1,23 +1,27 @@
-"""Redis cold state checkpoint storage."""
+"""Redis connection management and utilities.
+
+This module provides:
+- Redis connection for the application
+- Token blacklist for authentication
+- Session cache for user sessions
+
+Agent checkpointing is handled by LangGraph (see app/agent/checkpointer.py).
+"""
 
 import json
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timezone
 import redis.asyncio as redis
 
 from app.config import get_settings
-from app.models import AgentState
 
 settings = get_settings()
 
 
-class RedisCheckpoint:
-    """Redis checkpoint manager for cold state storage."""
+class RedisConnection:
+    """Redis connection manager with auth utilities."""
     
     def __init__(self):
         self.client: Optional[redis.Redis] = None
-        self.checkpoint_prefix = "checkpoint:"
-        self.cold_checkpoint_prefix = "cold_checkpoint:"
     
     async def connect(self):
         """Connect to Redis."""
@@ -32,50 +36,10 @@ class RedisCheckpoint:
         if self.client:
             await self.client.close()
     
-    async def save_cold_checkpoint(self, state: AgentState, ttl_seconds: int = 86400) -> str:
-        """Save agent state as cold checkpoint (Redis storage)."""
-        state_dict = state.model_dump(mode="json")
-        state_dict["state_type"] = "cold"
-        state_dict["updated_at"] = datetime.now(timezone.utc).isoformat()
-        
-        key = f"{self.cold_checkpoint_prefix}{state.session_id}"
-        await self.client.setex(
-            key,
-            ttl_seconds,
-            json.dumps(state_dict)
-        )
-        return key
+    # =========================================================================
+    # Token Blacklist (for auth/logout)
+    # =========================================================================
     
-    async def get_cold_checkpoint(self, session_id: str) -> Optional[AgentState]:
-        """Get cold checkpoint by session ID."""
-        key = f"{self.cold_checkpoint_prefix}{session_id}"
-        data = await self.client.get(key)
-        if data:
-            state_dict = json.loads(data)
-            return AgentState(**state_dict)
-        return None
-    
-    async def delete_cold_checkpoint(self, session_id: str) -> bool:
-        """Delete cold checkpoint."""
-        key = f"{self.cold_checkpoint_prefix}{session_id}"
-        result = await self.client.delete(key)
-        return result > 0
-    
-    async def migrate_to_cold(self, state: AgentState, ttl_seconds: int = 86400) -> str:
-        """Migrate a hot checkpoint to cold storage."""
-        state.state_type = "cold"
-        return await self.save_cold_checkpoint(state, ttl_seconds)
-    
-    async def list_cold_checkpoints(self, pattern: str = "*") -> List[str]:
-        """List all cold checkpoint keys matching pattern."""
-        keys = []
-        async for key in self.client.scan_iter(
-            match=f"{self.cold_checkpoint_prefix}{pattern}"
-        ):
-            keys.append(key.replace(self.cold_checkpoint_prefix, ""))
-        return keys
-    
-    # Token blacklist management for RBAC
     async def blacklist_token(self, token: str, ttl_seconds: int = 3600) -> None:
         """Add token to blacklist."""
         await self.client.setex(f"blacklist:{token}", ttl_seconds, "1")
@@ -84,7 +48,10 @@ class RedisCheckpoint:
         """Check if token is blacklisted."""
         return await self.client.exists(f"blacklist:{token}") > 0
     
-    # Session management
+    # =========================================================================
+    # Session Cache (for user sessions)
+    # =========================================================================
+    
     async def set_user_session(self, user_id: str, session_data: Dict[str, Any], ttl_seconds: int = 3600):
         """Set user session data."""
         key = f"session:{user_id}"
@@ -105,8 +72,9 @@ class RedisCheckpoint:
         return result > 0
 
 
-# Global instance
-redis_checkpoint = RedisCheckpoint()
+# Global instance - provides Redis connection and auth utilities
+# Note: Agent checkpointing uses LangGraph's AsyncRedisSaver
+redis_checkpoint = RedisConnection()
 
 
 async def get_redis() -> redis.Redis:

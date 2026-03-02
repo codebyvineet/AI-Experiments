@@ -1,9 +1,11 @@
 """FastAPI wrapper for FastMCP server with JWT authentication.
 
-This provides HTTP endpoints that:
-1. Validate JWT tokens from Backend API
-2. Set the token for tool execution
-3. Proxy requests to FastMCP
+This provides HTTP endpoints that work with the MCP client:
+1. /message - JSON-RPC endpoint (for tool calls)
+2. /tools - List available tools
+3. /health - Health check
+
+The actual tools are defined in server.py using FastMCP decorators.
 """
 import os
 import json
@@ -12,21 +14,19 @@ from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request, Header, HTTPException, Query
+from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-# Import the FastMCP server and token setter
-from . import server as mcp_server
+# Import the FastMCP server with tools
+from .server_new import mcp, BACKEND_URL
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-BACKEND_URL = os.getenv("BACKEND_URL", "http://app:8000")
 
 
 @asynccontextmanager
@@ -97,19 +97,30 @@ async def health_check():
 @app.get("/tools")
 async def list_tools():
     """List all available MCP tools."""
-    # Get tools from FastMCP server
     tools = []
-    for name, tool in mcp_server.mcp._tools.items():
+    for name, tool in mcp._tools.items():
+        # Get schema, filtering out 'ctx' parameter
+        schema = {}
+        if tool.parameters:
+            full_schema = tool.parameters.model_json_schema()
+            props = full_schema.get("properties", {})
+            # Remove 'ctx' from properties as it's injected by FastMCP
+            props = {k: v for k, v in props.items() if k != "ctx"}
+            required = [r for r in full_schema.get("required", []) if r != "ctx"]
+            schema = {"type": "object", "properties": props}
+            if required:
+                schema["required"] = required
+        
         tools.append({
             "name": name,
             "description": tool.description or f"Execute {name}",
-            "inputSchema": tool.parameters.model_json_schema() if tool.parameters else {}
+            "inputSchema": schema
         })
     return {"tools": tools}
 
 
 # ============================================================================
-# MCP PROTOCOL ENDPOINTS (JSON-RPC Compatible)
+# MCP PROTOCOL ENDPOINT (JSON-RPC Compatible)
 # ============================================================================
 
 class JSONRPCRequest(BaseModel):
@@ -117,6 +128,24 @@ class JSONRPCRequest(BaseModel):
     id: Optional[str] = None
     method: str
     params: Optional[Dict[str, Any]] = None
+
+
+# Mock context for tool execution (since we're not using FastMCP's native transport)
+class MockContext:
+    """Mock context to pass authorization token to tools."""
+    def __init__(self, token: str):
+        self._token = token
+        self.request = MockRequest(token)
+    
+    @property
+    def request_context(self):
+        return type('obj', (object,), {'meta': {'token': self._token}})()
+
+
+class MockRequest:
+    """Mock request with headers."""
+    def __init__(self, token: str):
+        self.headers = {"Authorization": f"Bearer {token}"}
 
 
 @app.post("/message")
@@ -160,14 +189,9 @@ async def handle_message(
         elif method == "ping":
             result = {"pong": True}
         elif method == "tools/list":
-            tools = []
-            for name, tool in mcp_server.mcp._tools.items():
-                tools.append({
-                    "name": name,
-                    "description": tool.description or f"Execute {name}",
-                    "inputSchema": tool.parameters.model_json_schema() if tool.parameters else {}
-                })
-            result = {"tools": tools}
+            # Get tools from FastMCP server (same as /tools endpoint)
+            tools_response = await list_tools()
+            result = tools_response
         elif method == "tools/call":
             if not token:
                 raise PermissionError("Authorization token required for tools/call")
@@ -182,25 +206,22 @@ async def handle_message(
             if not tool_name:
                 raise ValueError("Missing tool name")
             
-            # Set token for the tool execution
-            mcp_server._current_token = token
+            # Get the tool from FastMCP
+            tool = mcp._tools.get(tool_name)
+            if not tool:
+                raise ValueError(f"Unknown tool: {tool_name}")
             
-            try:
-                # Get and call the tool
-                tool = mcp_server.mcp._tools.get(tool_name)
-                if not tool:
-                    raise ValueError(f"Unknown tool: {tool_name}")
-                
-                # Execute the tool
-                tool_result = await tool.fn(**arguments)
-                
-                result = {
-                    "content": [
-                        {"type": "text", "text": json.dumps(tool_result)}
-                    ]
-                }
-            finally:
-                mcp_server._current_token = None
+            # Create mock context with token for authorization
+            ctx = MockContext(token)
+            
+            # Execute the tool with context
+            tool_result = await tool.fn(ctx=ctx, **arguments)
+            
+            result = {
+                "content": [
+                    {"type": "text", "text": json.dumps(tool_result)}
+                ]
+            }
                 
         elif method == "resources/list":
             result = {"resources": []}
@@ -277,15 +298,14 @@ async def direct_tool_call(
     
     logger.info(f"[Direct] Calling tool: {tool_name}")
     
-    # Set token and call tool
-    mcp_server._current_token = token
+    tool = mcp._tools.get(tool_name)
+    if not tool:
+        raise HTTPException(status_code=404, detail=f"Tool not found: {tool_name}")
     
     try:
-        tool = mcp_server.mcp._tools.get(tool_name)
-        if not tool:
-            raise HTTPException(status_code=404, detail=f"Tool not found: {tool_name}")
-        
-        result = await tool.fn(**body)
+        # Create mock context with token
+        ctx = MockContext(token)
+        result = await tool.fn(ctx=ctx, **body)
         return result
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
@@ -293,8 +313,21 @@ async def direct_tool_call(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        mcp_server._current_token = None
+
+
+# ============================================================================
+# NATIVE MCP ENDPOINT (for langchain-mcp-adapters)
+# ============================================================================
+
+# Mount FastMCP's native ASGI app for streamable-http transport
+# This allows langchain-mcp-adapters to use the native MCP protocol
+try:
+    from starlette.routing import Mount
+    # Note: FastMCP's native transport requires the app to be run separately
+    # For now, we use the JSON-RPC wrapper above for compatibility
+    pass
+except ImportError:
+    pass
 
 
 # ============================================================================
