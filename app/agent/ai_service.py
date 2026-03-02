@@ -170,30 +170,17 @@ class AIService:
             await self.initialize()
         
         log.info(f"📋 Generating plan for goal: {goal}")
-        log.info(f"🔧 User permissions: {user_permissions or 'not specified'}")
         
         # Get system context (MCP tools only - no direct API knowledge)
         system_tools = get_system_tools_description()
         
-        # Filter tools based on user permissions if provided
-        permission_context = ""
-        if user_permissions:
-            permission_context = f"""
-## Your Available Permissions
-You have the following permissions: {', '.join(user_permissions)}
-
-Only use tools that match your permissions. For example:
-- items:read allows read_item, list_items, search_items
-- items:write allows create_item, update_item, bulk_create
-- items:delete allows delete_item, bulk_delete
-"""
+        # NOTE: We do NOT pass permissions to AI - authorization happens at MCP tool execution level
+        # The AI should create plans freely; the MCP server enforces permissions when tools are called
         
         # Build the planning prompt with MCP tools only
         prompt = f"""You are a planning agent for an AI-powered system. Create a detailed execution plan for the following goal.
 
 {system_tools}
-
-{permission_context}
 
 ---
 
@@ -204,6 +191,8 @@ GOAL: {goal}
 {"CONTEXT: " + json.dumps(context) if context else ""}
 
 Create a JSON plan that uses the MCP tools available in this system. The plan should reference specific MCP tools (like create_item, read_item, list_items, search_items, etc.).
+
+IMPORTANT: Do NOT worry about user permissions. Just create the best plan to accomplish the goal. Authorization is handled automatically by the MCP server when tools are executed.
 
 Response format:
 {{
@@ -239,6 +228,7 @@ Important rules:
 5. Include 3-6 steps depending on complexity
 6. Each step should have 2-4 sub-tasks
 7. Be specific about which MCP tools each task will use
+8. Do NOT check or mention user permissions - just plan the best approach
 
 Respond ONLY with valid JSON, no markdown or explanation.
 """
