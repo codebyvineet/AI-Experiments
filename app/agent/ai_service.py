@@ -135,6 +135,27 @@ class AIService:
             log.error(f"❌ Failed to initialize Vertex AI: {e}")
             return False
     
+    def _format_previous_results(self, previous_results: List[Dict[str, Any]]) -> str:
+        """Format previous task results for inclusion in prompts."""
+        if not previous_results:
+            return "No previous results available yet."
+        
+        formatted = []
+        for i, result in enumerate(previous_results):
+            task_name = result.get("task_name", f"Task {i+1}")
+            status = result.get("status", "unknown")
+            output = result.get("output_data", {})
+            result_text = result.get("result", "")
+            
+            formatted.append(f"""
+### Result {i+1}: {task_name}
+- Status: {status}
+- Result: {result_text}
+- Output Data: {json.dumps(output, indent=2) if output else 'N/A'}
+""")
+        
+        return "\n".join(formatted)
+    
     async def generate_plan(
         self, 
         goal: str, 
@@ -408,8 +429,13 @@ STEP CONTEXT:
 - Step Description: {step_info.get('description', '')}
 - MCP Tools for this step: {mcp_tools_used}
 
+## PREVIOUS TASK RESULTS (USE THIS DATA!)
+{self._format_previous_results(context.get('previous_results', []))}
+
 ADDITIONAL CONTEXT:
-{json.dumps(context, indent=2)}
+Goal: {context.get('goal', '')}
+Tool: {context.get('tool', 'N/A')}
+Tool Params: {json.dumps(context.get('tool_params', {}))}
 
 Execute this task and provide a structured result:
 {{
