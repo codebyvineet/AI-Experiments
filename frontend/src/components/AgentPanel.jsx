@@ -66,6 +66,10 @@ export default function AgentPanel({ token, user }) {
                   result: data.result,
                   timestamp: new Date().toISOString()
                 }]);
+              } else if (data.type === 'execution_stopped') {
+                // Authorization failure or other stop event
+                setStatus('stopped');
+                setFinalSummary(`⚠️ Execution Stopped\n\nReason: ${data.reason || 'unknown'}\n${data.message || ''}\n\nFailed task: ${data.failed_task || 'unknown'}`);
               } else if (data.type === 'execution_complete') {
                 setStatus('completed');
                 // Capture final summary if provided
@@ -170,6 +174,8 @@ export default function AgentPanel({ token, user }) {
       task_start: '🔧',
       task_complete: '✓',
       execution_complete: '🎉',
+      execution_stopped: '🚫',
+      authorization_failed: '🔒',
       error: '❌'
     };
     return icons[type] || '📌';

@@ -466,6 +466,9 @@ class MultiAgentOrchestrator:
             "message": f"Starting {len(sub_tasks)} parallel AI tasks..."
         }
         
+        # Track if any task had auth failure
+        auth_failure = None
+        
         # Execute tasks in parallel using real AI
         async def execute_task_with_ai(task: Dict[str, Any], index: int):
             task_start = time.time()
@@ -488,8 +491,13 @@ class MultiAgentOrchestrator:
                 token=session.token  # Pass token for MCP calls
             )
             
-            task["status"] = "completed"
-            task["result"] = result.get("result", "Completed")
+            # Check for authorization failure
+            if result.get("status") == "authorization_failed":
+                task["status"] = "authorization_failed"
+                task["result"] = result.get("result", "Authorization denied")
+            else:
+                task["status"] = "completed" if result.get("status") == "success" else result.get("status", "completed")
+                task["result"] = result.get("result", "Completed")
             
             return {
                 "index": index,
@@ -517,6 +525,21 @@ class MultiAgentOrchestrator:
                 "duration_ms": result["duration_ms"],
                 "message": f"Completed: {result['task']['name']}"
             }
+            
+            # Track authorization failure
+            if result["result"].get("status") == "authorization_failed":
+                auth_failure = result
+        
+        # If any task had auth failure, stop execution
+        if auth_failure:
+            log.error(f"🚫 Authorization failure in parallel step - stopping execution")
+            yield {
+                "type": "execution_stopped",
+                "reason": "authorization_failed",
+                "message": f"Execution stopped: {auth_failure['result'].get('result', 'Insufficient permissions')}",
+                "failed_task": auth_failure['task']['name']
+            }
+            return  # Stop further execution
         
         log.info(f"✅ All parallel tasks completed")
         
@@ -585,7 +608,32 @@ class MultiAgentOrchestrator:
                 token=session.token  # Pass token for MCP calls
             )
             
-            task["status"] = "completed"
+            # Check for authorization failure - stop execution
+            if result.get("status") == "authorization_failed":
+                task["status"] = "authorization_failed"
+                task["result"] = result.get("result", "Authorization denied")
+                
+                log.error(f"🚫 Authorization failure - stopping execution: {task['name']}")
+                
+                yield {
+                    "type": "task_complete",
+                    "step_id": step["step_id"],
+                    "task_index": i,
+                    "task": task,
+                    "result": result,
+                    "duration_ms": int((time.time() - task_start) * 1000),
+                    "message": f"Authorization failed: {task['name']}"
+                }
+                
+                yield {
+                    "type": "execution_stopped",
+                    "reason": "authorization_failed",
+                    "message": f"Execution stopped: {result.get('result', 'Insufficient permissions')}",
+                    "failed_task": task["name"]
+                }
+                return  # Stop further execution
+            
+            task["status"] = "completed" if result.get("status") == "success" else result.get("status", "completed")
             task["result"] = result.get("result", "Completed")
             previous_results.append(result)
             

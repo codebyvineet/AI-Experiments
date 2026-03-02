@@ -358,7 +358,7 @@ Respond ONLY with valid JSON, no markdown or explanation.
                 mcp_result = await mcp_client.call_tool(task_tool, task_tool_params, token)
                 duration_ms = int((time.time() - start_time) * 1000)
                 
-                # Check if result indicates error
+                # Check if result indicates error (dict with error key)
                 if isinstance(mcp_result, dict) and mcp_result.get("error"):
                     log.error(f"❌ MCP tool {task_tool} failed: {mcp_result.get('error')}")
                     return {
@@ -366,6 +366,32 @@ Respond ONLY with valid JSON, no markdown or explanation.
                         "status": "failed",
                         "result": f"MCP tool error: {mcp_result.get('error')}",
                         "output_data": {"error": mcp_result.get("error")},
+                        "duration_ms": duration_ms
+                    }
+                
+                # Check if result contains authorization error as string
+                result_str = str(mcp_result.get("result", "") if isinstance(mcp_result, dict) else mcp_result)
+                if "Authorization error" in result_str or "Forbidden" in result_str or "insufficient permissions" in result_str:
+                    log.error(f"❌ MCP tool {task_tool} authorization denied: {result_str}")
+                    return {
+                        "task_name": task_name,
+                        "status": "authorization_failed",
+                        "result": f"Authorization denied: {result_str}",
+                        "output_data": {"error": result_str, "error_type": "authorization"},
+                        "mcp_tool_executed": task_tool,
+                        "notes": "Operation requires elevated permissions",
+                        "duration_ms": duration_ms
+                    }
+                
+                # Check for other tool execution failures in result
+                if "Tool execution failed" in result_str or "error" in result_str.lower()[:50]:
+                    log.error(f"❌ MCP tool {task_tool} execution failed: {result_str[:200]}")
+                    return {
+                        "task_name": task_name,
+                        "status": "failed",
+                        "result": f"Tool execution failed: {result_str[:200]}",
+                        "output_data": {"error": result_str},
+                        "mcp_tool_executed": task_tool,
                         "duration_ms": duration_ms
                     }
                 
