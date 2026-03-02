@@ -9,7 +9,7 @@ The auth_token is injected by the JSON-RPC wrapper (app.py) when calling tools.
 """
 import os
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 
 import httpx
 from fastmcp import FastMCP
@@ -168,30 +168,6 @@ async def search_items(
     if isinstance(result, list):
         return {"items": result, "count": len(result), "query": query}
     return result
-
-
-# ============================================================================
-# BATCH OPERATIONS
-# ============================================================================
-
-@mcp.tool
-async def bulk_create(
-    items: List[dict] = Field(description="Array of items to create, each with name, description, data"),
-    auth_token: str = Field(default="", description="Authorization token (injected by wrapper)")
-) -> dict:
-    """Create multiple items at once."""
-    logger.info(f"[bulk_create] Creating {len(items)} items")
-    return await backend_request("POST", "/items/batch/create", token=auth_token, json_data={"items": items})
-
-
-@mcp.tool
-async def bulk_delete(
-    item_ids: List[str] = Field(description="Array of item IDs to delete"),
-    auth_token: str = Field(default="", description="Authorization token (injected by wrapper)")
-) -> dict:
-    """Delete multiple items by their IDs."""
-    logger.info(f"[bulk_delete] Deleting {len(item_ids)} items")
-    return await backend_request("POST", "/items/batch/delete", token=auth_token, json_data={"item_ids": item_ids})
 
 
 # ============================================================================

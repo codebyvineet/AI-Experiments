@@ -44,26 +44,19 @@ All operations go through the MCP Server which handles authorization.
 6. **search_items** - Search items by text query
    - Parameters: query (string, required), field (string: all|name|description|data), limit, offset
 
-### Batch Operation Tools
-7. **bulk_create** - Create multiple items at once
-   - Parameters: items (array of {name, description, data})
-
-8. **bulk_delete** - Delete multiple items by IDs
-   - Parameters: item_ids (array of strings)
-
 ### Statistics & Report Tools
-9. **get_statistics** - Get database statistics
+7. **get_statistics** - Get database statistics
    - Parameters: none
 
-10. **generate_report** - Generate a report
+8. **generate_report** - Generate a report
     - Parameters: report_type (summary|detailed|activity), filters (object)
 
 ### User Tools
-11. **get_user_profile** - Get current user's profile
+9. **get_user_profile** - Get current user's profile
     - Parameters: none
 
-12. **update_user_profile** - Update user profile
-    - Parameters: display_name, email, preferences
+10. **update_user_profile** - Update user profile
+     - Parameters: display_name, email, preferences
 
 ## System Capabilities
 - MCP Server handles all tool execution with proper authorization
@@ -176,8 +169,8 @@ class AIService:
         
         log.info(f"📋 Generating plan for goal: {goal}")
         
-        # Get system context (MCP tools only - no direct API knowledge)
-        system_tools = get_system_tools_description()
+        # Get system context - fetch actual tools from MCP server
+        system_tools = await get_dynamic_tools_description()
         
         # NOTE: We do NOT pass permissions to AI - authorization happens at MCP tool execution level
         # The AI should create plans freely; the MCP server enforces permissions when tools are called
@@ -197,37 +190,36 @@ GOAL: {goal}
 
 Create a JSON execution plan using the available MCP tools.
 
-## CRITICAL RULES - Read Carefully
+## CRITICAL RULES
 
-1. **KEEP IT SIMPLE**: Match plan complexity to the goal:
-   - Simple lookups/queries → 1 step, 1-2 sub-tasks (e.g., search_items + return results)
-   - CRUD operations → 1-2 steps (e.g., create/update item, then verify)
-   - Complex multi-entity workflows → 2-4 steps maximum
-   
-2. **USE SEQUENTIAL MODE BY DEFAULT**: Only use "parallel" when sub-tasks are truly independent AND don't need each other's results.
+1. **ONLY USE LISTED TOOLS**: You may ONLY use tool names from the list above. NEVER invent tool names. If no bulk/batch tool exists, decompose the work into individual tool calls.
 
-3. **EACH SUB-TASK MUST HAVE A TOOL**: Every sub-task should call a specific MCP tool. Do NOT create sub-tasks that just "analyze" or "consolidate" data without a tool — that happens automatically.
+2. **ONE TOOL CALL = ONE SUB-TASK**: Each sub-task calls exactly one MCP tool. If the user asks to operate on N items, create N sub-tasks — one per item, each with its own concrete tool_params.
 
-4. **USE REAL VALUES**: For tool_params, use actual values from the user's goal. Do NOT use placeholders like "from_previous_step" — each tool call must be self-contained.
+3. **THINK ABOUT DEPENDENCIES TO CHOOSE EXECUTION MODE**:
+   - "parallel": Sub-tasks that do NOT depend on each other's output (e.g., creating several items, querying unrelated data)
+   - "sequential": Sub-tasks where one needs the result of a previous one (e.g., search first, then update the found item)
 
-5. **NO VALIDATION STEPS**: Do not add validation/verification steps unless the user specifically asks for verification. The MCP tools return results directly.
+4. **USE REAL VALUES**: Extract actual values from the user's goal into tool_params. NEVER use placeholders like "from_previous_step". Each tool call must be self-contained.
 
-6. **RESULTS PASS AUTOMATICALLY**: Each step receives all results from previous steps. You do not need extra steps to "pass data" or "consolidate results."
+5. **NO FILLER**: No sub-tasks for "validate", "consolidate", "analyze", or "summarize". Results flow automatically between steps. Only create sub-tasks that call a real tool.
+
+6. **STEP COUNT = DEPENDENCY DEPTH**: Group independent work into one step. Only create a new step when it needs results from the previous step. Maximum 4 steps.
 
 Response format:
 {{
-    "analysis": "Brief analysis: what the user wants and which tool(s) to use",
+    "analysis": "Brief reasoning: what the user wants, which tools to use, and whether operations are independent (parallel) or dependent (sequential/multi-step)",
     "steps": [
         {{
             "phase": "research|execution|data_operations",
             "description": "What this step does",
             "agent_type": "research|execution",
-            "execution_mode": "sequential",
+            "execution_mode": "sequential|parallel",
             "sub_tasks": [
                 {{
                     "name": "Descriptive task name",
                     "description": "What this sub-task does",
-                    "tool": "MCP tool name",
+                    "tool": "exact tool name from list above",
                     "tool_params": {{}}
                 }}
             ],
@@ -237,20 +229,6 @@ Response format:
     ],
     "estimated_complexity": "low|medium|high"
 }}
-
-## Examples
-
-**Simple query "find items about X":**
-→ 1 step: search_items with query="X"
-
-**"Create an item called Y":**
-→ 1 step: create_item with name="Y"
-
-**"List all items and get statistics":**
-→ 1 step with 2 sequential sub-tasks: list_items, then get_statistics
-
-**"Search for X, then update its description":**
-→ 2 steps: (1) search_items for X, (2) update_item with results
 
 Respond ONLY with valid JSON, no markdown or explanation.
 """
