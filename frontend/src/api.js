@@ -91,7 +91,11 @@ export const api = {
       },
       body: JSON.stringify({ goal })
     });
-    return res.json();
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.detail || `HTTP ${res.status}: Session creation failed`);
+    }
+    return data;
   },
 
   async getSession(token, sessionId) {

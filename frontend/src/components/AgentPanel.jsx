@@ -79,6 +79,21 @@ export default function AgentPanel({ token, user }) {
 
     try {
       const session = await api.createSession(token, goal);
+      
+      // Check for auth errors
+      if (session.detail === 'Could not validate credentials' || session.detail === 'Not authenticated') {
+        addEvent({ type: 'error', error: 'Session expired. Please log in again.' });
+        setStatus('idle');
+        return;
+      }
+      
+      // Check if session_id exists
+      if (!session.session_id) {
+        addEvent({ type: 'error', error: `Failed to create session: ${JSON.stringify(session)}` });
+        setStatus('idle');
+        return;
+      }
+      
       setSessionId(session.session_id);
       addEvent({ type: 'session_created', session_id: session.session_id });
       
