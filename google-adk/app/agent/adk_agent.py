@@ -2,7 +2,7 @@
 
 Architecture
 ------------
-Two operating modes share the same ADK ``Runner`` and MongoDB session store:
+Two operating modes share the same ADK ``Runner`` and in-memory session store:
 
 Chat mode  — a single ``LlmAgent`` with MCP tools executes ReAct-style
              tool calls in one turn.
@@ -14,15 +14,9 @@ Plan mode  — a two-phase workflow:
 
 Session State Strategy
 ----------------------
-ADK session state is updated via ``append_event`` with ``state_delta``
-(the recommended event-driven pattern).  Plan metadata is *also* mirrored
-to the ``agent_sessions`` MongoDB collection so the REST API can query it
-without re-running the agent.
-
-Session persistence uses ``adk-mongodb-session`` (``MongodbSessionService``),
-which stores the full conversation history and state in MongoDB.
-
-The Redis token blacklist used by ``authorization.py`` is unchanged.
+ADK uses ``InMemorySessionService`` for conversation state (fast, no compat
+issues).  Plan metadata and session ownership are persisted to the
+``agent_sessions`` MongoDB collection so the REST API can query them.
 
 MCP tools are fetched from the standalone MCP server at startup via
 ``MCPToolset`` so the server stays completely independent.
@@ -34,11 +28,11 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from google.adk.agents import LlmAgent
-from google.adk.events import Event
 from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
 from google.adk.tools.mcp_tool import MCPToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import SseConnectionParams
 from google.genai.types import Content, Part
@@ -49,28 +43,18 @@ from app.crud import get_db
 settings = get_settings()
 _log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Session service (MongoDB-backed via adk-mongodb-session)
-# ---------------------------------------------------------------------------
-
-def _build_session_service():
-    """Lazily import and instantiate the MongoDB session service."""
-    from adk_mongodb_session.mongodb.sessions import MongodbSessionService  # type: ignore
-
-    return MongodbSessionService(
-        db_url=settings.mongodb_url,
-        database=settings.mongodb_database,
-        collection_prefix="adk",
-    )
-
 
 # ---------------------------------------------------------------------------
 # ADK agents
 # ---------------------------------------------------------------------------
 
 _CHAT_INSTRUCTION = """You are a helpful AI assistant with access to tools for
-managing items (create, read, update, delete). Use the available tools to
-fulfil user requests accurately. Always confirm actions you have taken."""
+managing items (create, read, update, delete, list). Use the available tools to
+fulfil user requests accurately. Always confirm actions you have taken.
+
+IMPORTANT: When calling any tool, you MUST pass the auth_token parameter.
+The auth_token will be provided to you in the user message context.
+Always include auth_token in every tool call."""
 
 _PLANNER_INSTRUCTION = """You are a planning agent. Given a user goal, produce
 a JSON execution plan as a list of steps.
@@ -143,7 +127,7 @@ class ADKAgentManager:
         Must be called once during application startup (inside the lifespan
         context), after the MongoDB connection is established.
         """
-        self._session_service = _build_session_service()
+        self._session_service = InMemorySessionService()
 
         self._chat_runner = Runner(
             agent=_build_chat_agent(),
@@ -223,26 +207,62 @@ class ADKAgentManager:
     # Chat mode
     # ------------------------------------------------------------------
 
-    async def chat(self, session_id: str, user_id: str, message: str) -> str:
+    async def chat(self, session_id: str, user_id: str, message: str, auth_token: str = "") -> str:
         """Run a single chat turn and return the agent's text reply."""
-        events = []
-        async for event in self._chat_runner.run_async(
-            user_id=user_id,
-            session_id=session_id,
-            new_message=Content(
-                role="user",
-                parts=[Part.from_text(message)],
-            ),
-        ):
-            events.append(event)
+        reply_parts = []
+        async for chunk in self.chat_stream(session_id, user_id, message, auth_token):
+            if chunk.get("type") == "text":
+                reply_parts.append(chunk["content"])
+        return "".join(reply_parts)
 
-        # Extract the final model text response
-        for event in reversed(events):
-            if hasattr(event, "content") and event.content:
+    async def chat_stream(
+        self, session_id: str, user_id: str, message: str, auth_token: str = ""
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Run a chat turn and yield streaming events for the frontend."""
+        yield {"type": "status", "content": "Connecting to MCP tools..."}
+
+        # Inject auth token into message so the agent can pass it to tools
+        full_message = message
+        if auth_token:
+            full_message = f"[System context: use auth_token=\"{auth_token}\" for all tool calls]\n\n{message}"
+
+        try:
+            async for event in self._chat_runner.run_async(
+                user_id=user_id,
+                session_id=session_id,
+                new_message=Content(
+                    role="user",
+                    parts=[Part.from_text(text=full_message)],
+                ),
+            ):
+                if not hasattr(event, "content") or not event.content:
+                    continue
+                if not event.content.parts:
+                    continue
+
                 for part in event.content.parts:
-                    if hasattr(part, "text") and part.text:
-                        return part.text
-        return ""
+                    # Tool call
+                    if hasattr(part, "function_call") and part.function_call:
+                        fc = part.function_call
+                        yield {
+                            "type": "tool_call",
+                            "tool": fc.name,
+                            "args": dict(fc.args) if fc.args else {},
+                        }
+                    # Tool result
+                    elif hasattr(part, "function_response") and part.function_response:
+                        fr = part.function_response
+                        yield {
+                            "type": "tool_result",
+                            "tool": fr.name,
+                            "result": fr.response if fr.response else {},
+                        }
+                    # Text
+                    elif hasattr(part, "text") and part.text:
+                        yield {"type": "text", "content": part.text}
+        except Exception as exc:
+            _log.exception("Chat stream error for session %s", session_id)
+            yield {"type": "error", "content": str(exc)}
 
     # ------------------------------------------------------------------
     # Plan mode
@@ -263,7 +283,7 @@ class ADKAgentManager:
             session_id=session_id,
             new_message=Content(
                 role="user",
-                parts=[Part.from_text(f"Generate a plan for: {goal}")],
+                parts=[Part.from_text(text=f"Generate a plan for: {goal}")],
             ),
         ):
             if hasattr(event, "content") and event.content:
@@ -302,17 +322,13 @@ class ADKAgentManager:
                 "status": "pending",
             }]
 
-        # Update ADK session state via append_event (event-driven pattern)
-        state_delta = {
+        # Mirror to our own metadata collection for fast API queries
+        await self._update_session_meta(session_id, {
             "is_planning_mode": True,
             "plan": plan,
             "current_step": 0,
             "is_complete": False,
-        }
-        await self._update_adk_state(session_id, user_id, state_delta)
-
-        # Mirror to our own metadata collection for fast API queries
-        await self._update_session_meta(session_id, state_delta)
+        })
 
         return {
             "session_id": session_id,
@@ -321,7 +337,7 @@ class ADKAgentManager:
             "total_steps": len(plan),
         }
 
-    async def execute_step(self, session_id: str) -> Dict[str, Any]:
+    async def execute_step(self, session_id: str, auth_token: str = None) -> Dict[str, Any]:
         """Execute the next pending step in the plan."""
         meta = await self._load_session_meta(session_id)
         if not meta:
@@ -344,15 +360,18 @@ class ADKAgentManager:
 
         # Ask the chat (executor) agent to carry out this step
         step_result_text = ""
+        step_instruction = (
+            f"Execute plan step {step['step_id']}: {step['description']} "
+            f"(action: {step['action']})"
+        )
+        if auth_token:
+            step_instruction += f'\n[System context: use auth_token="{auth_token}" for all tool calls]'
         async for event in self._chat_runner.run_async(
             user_id=user_id,
             session_id=session_id,
             new_message=Content(
                 role="user",
-                parts=[Part.from_text(
-                    f"Execute plan step {step['step_id']}: {step['description']} "
-                    f"(action: {step['action']})"
-                )],
+                parts=[Part.from_text(text=step_instruction)],
             ),
         ):
             if hasattr(event, "content") and event.content:
@@ -367,17 +386,14 @@ class ADKAgentManager:
         is_complete = new_step >= len(plan)
 
         plan[current_step] = step
-        state_delta: Dict[str, Any] = {
+
+        # Persist updates
+        await self._update_session_meta(session_id, {
             "plan": plan,
             "current_step": new_step,
             "is_complete": is_complete,
-        }
-        if is_complete:
-            state_delta["is_planning_mode"] = False
-
-        # Persist updates
-        await self._update_adk_state(session_id, user_id, state_delta)
-        await self._update_session_meta(session_id, state_delta)
+            **({"is_planning_mode": False} if is_complete else {}),
+        })
 
         return {
             "session_id": session_id,
@@ -387,11 +403,11 @@ class ADKAgentManager:
             "is_complete": is_complete,
         }
 
-    async def execute_all_steps(self, session_id: str) -> Dict[str, Any]:
+    async def execute_all_steps(self, session_id: str, auth_token: str = None) -> Dict[str, Any]:
         """Execute all remaining plan steps sequentially."""
         results = []
         while True:
-            result = await self.execute_step(session_id)
+            result = await self.execute_step(session_id, auth_token=auth_token)
             results.append(result)
             if result.get("is_complete"):
                 break
@@ -404,29 +420,6 @@ class ADKAgentManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    async def _update_adk_state(
-        self,
-        session_id: str,
-        user_id: str,
-        state_delta: Dict[str, Any],
-    ) -> None:
-        """Push a state update into the ADK session via append_event."""
-        from google.adk.events import EventActions  # type: ignore
-
-        adk_session = await self._session_service.get_session(
-            app_name=self.APP_NAME,
-            user_id=user_id,
-            session_id=session_id,
-        )
-        if adk_session is None:
-            return
-
-        event = Event(
-            author="system",
-            actions=EventActions(state_delta=state_delta),
-        )
-        await self._session_service.append_event(adk_session, event)
 
     async def _save_session_meta(self, session_id: str, user_id: str) -> None:
         """Persist lightweight session metadata to the agent_sessions collection."""

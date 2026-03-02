@@ -6,7 +6,7 @@ The ADK agent connects to ``http://mcp-server:8001/sse`` via
 """
 
 import os
-from src.server import mcp  # type: ignore
+from server import mcp  # type: ignore
 
 
 if __name__ == "__main__":

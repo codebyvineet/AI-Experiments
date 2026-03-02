@@ -12,9 +12,6 @@ redis>=5.0.1
 # Google ADK (Agent Development Kit) — replaces custom LangGraph agent
 google-adk>=1.0.0
 
-# MongoDB session service for Google ADK
-adk-mongodb-session>=0.1.0
-
 # Google Generative AI (Gemini — used by ADK internally)
 google-generativeai>=0.8.0
 
@@ -26,6 +23,7 @@ fastmcp>=2.0.0
 # Authentication
 python-jose[cryptography]>=3.4.0
 passlib[bcrypt]>=1.7.4
+bcrypt==4.0.1
 
 # Utilities
 python-dotenv>=1.0.1

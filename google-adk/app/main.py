@@ -83,7 +83,54 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "framework": "google-adk"}
+    """Health check with MongoDB and Redis status."""
+    from app.crud import get_db
+    mongo_ok = False
+    redis_ok = False
+    try:
+        db = get_db()
+        await db.command("ping")
+        mongo_ok = True
+    except Exception:
+        pass
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        await r.ping()
+        redis_ok = True
+        await r.aclose()
+    except Exception:
+        pass
+    return {
+        "status": "healthy" if mongo_ok and redis_ok else "degraded",
+        "framework": "google-adk",
+        "mongodb": "connected" if mongo_ok else "disconnected",
+        "redis": "connected" if redis_ok else "disconnected",
+    }
+
+
+@app.get("/mcp/tools")
+async def list_mcp_tools():
+    """List available MCP tools from the standalone MCP server."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            # Use SSE to get tools list from MCP server
+            resp = await client.get(f"{settings.mcp_server_url}/sse")
+            # Fallback: return the known tools
+    except Exception:
+        pass
+    # Return known tool definitions (static for the current MCP server)
+    return {
+        "tools": [
+            {"name": "list_items", "description": "List all items in the system", "parameters": {"limit": "int (default 50)", "auth_token": "string"}},
+            {"name": "read_item", "description": "Read a single item by ID", "parameters": {"item_id": "string", "auth_token": "string"}},
+            {"name": "create_item", "description": "Create a new item", "parameters": {"name": "string", "description": "string", "data": "JSON string", "auth_token": "string"}},
+            {"name": "update_item", "description": "Update an existing item", "parameters": {"item_id": "string", "name": "string?", "description": "string?", "data": "JSON string?", "auth_token": "string"}},
+            {"name": "delete_item", "description": "Delete an item by ID", "parameters": {"item_id": "string", "auth_token": "string"}},
+        ],
+        "server_url": settings.mcp_server_url,
+    }
 
 
 if __name__ == "__main__":

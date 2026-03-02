@@ -1,7 +1,9 @@
 """Google ADK agent API routes — plan mode and chat mode."""
 
+import json
 from typing import Optional
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Request, status, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.auth import get_current_user, require_permission
@@ -34,6 +36,23 @@ async def create_session(
     """Create a new ADK agent session."""
     session_id = await adk_agent.create_session(current_user.user_id)
     return {"session_id": session_id, "user_id": current_user.user_id, "status": "created"}
+
+
+@router.get("/sessions")
+async def list_sessions(
+    current_user: TokenData = Depends(require_permission("agent:execute")),
+):
+    """List all sessions for the current user."""
+    from app.crud import get_db
+    db = get_db()
+    query = {"user_id": current_user.user_id, "archived": {"$ne": True}}
+    if "agent:admin" in (current_user.permissions or []):
+        query = {"archived": {"$ne": True}}
+    sessions = []
+    async for doc in db.agent_sessions.find(query).sort("created_at", -1):
+        doc.pop("_id", None)
+        sessions.append(doc)
+    return sessions
 
 
 @router.get("/sessions/{session_id}")
@@ -79,27 +98,67 @@ async def archive_session(
 async def chat(
     session_id: str,
     request: ChatRequest,
+    req: Request,
     current_user: TokenData = Depends(require_permission("agent:execute")),
 ):
-    """Send a message to the chat agent and receive a response.
-
-    The Google ADK ``LlmAgent`` uses ReAct-style reasoning and can call
-    MCP tools from the standalone MCP server.
-    """
+    """Send a message to the chat agent and receive a response."""
+    auth_header = req.headers.get("authorization", "")
+    token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
     try:
         reply = await adk_agent.chat(
             session_id=session_id,
             user_id=current_user.user_id,
             message=request.message,
+            auth_token=token,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
 
     return {
         "session_id": session_id,
         "user_message": request.message,
         "agent_reply": reply,
     }
+
+
+@router.post("/sessions/{session_id}/chat/stream")
+async def chat_stream(
+    session_id: str,
+    request: ChatRequest,
+    req: Request,
+    current_user: TokenData = Depends(require_permission("agent:execute")),
+):
+    """SSE streaming chat endpoint — yields events as the agent works."""
+    auth_header = req.headers.get("authorization", "")
+    token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
+
+    async def event_generator():
+        try:
+            async for chunk in adk_agent.chat_stream(
+                session_id=session_id,
+                user_id=current_user.user_id,
+                message=request.message,
+                auth_token=token,
+            ):
+                yield f"data: {json.dumps(chunk)}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -122,11 +181,13 @@ async def enter_plan_mode(
 @router.post("/sessions/{session_id}/execute-step")
 async def execute_step(
     session_id: str,
+    request: Request,
     current_user: TokenData = Depends(require_permission("agent:execute")),
 ):
     """Execute the next pending step in the plan."""
     try:
-        return await adk_agent.execute_step(session_id)
+        auth_token = request.headers.get("Authorization", "").replace("Bearer ", "")
+        return await adk_agent.execute_step(session_id, auth_token=auth_token)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
@@ -134,10 +195,12 @@ async def execute_step(
 @router.post("/sessions/{session_id}/execute-all")
 async def execute_all_steps(
     session_id: str,
+    request: Request,
     current_user: TokenData = Depends(require_permission("agent:execute")),
 ):
     """Execute all remaining steps in the plan."""
     try:
-        return await adk_agent.execute_all_steps(session_id)
+        auth_token = request.headers.get("Authorization", "").replace("Bearer ", "")
+        return await adk_agent.execute_all_steps(session_id, auth_token=auth_token)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
