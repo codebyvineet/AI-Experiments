@@ -11,6 +11,7 @@ export default function AgentPanel({ token, user }) {
   const [status, setStatus] = useState('idle'); // idle, planning, planned, executing, completed, stopped
   const [isStreaming, setIsStreaming] = useState(false);
   const [previousSessions, setPreviousSessions] = useState([]);
+  const [messageInput, setMessageInput] = useState('');
   const eventsEndRef = useRef(null);
   const abortControllerRef = useRef(null);
 
@@ -237,6 +238,40 @@ export default function AgentPanel({ token, user }) {
     setResults([]);
     setFinalSummary(null);
     setStatus('idle');
+    setMessageInput('');
+  };
+
+  // Send message to current session (interrupts and replans)
+  const handleSendMessage = async () => {
+    if (!sessionId || !messageInput.trim()) return;
+    
+    const message = messageInput.trim();
+    setMessageInput('');
+    addEvent({ type: 'user_action', action: `Message sent: ${message}` });
+    
+    try {
+      // Stop current execution if running
+      if (isStreaming) {
+        abortControllerRef.current?.abort();
+        setIsStreaming(false);
+      }
+      
+      // Send message to backend
+      const response = await api.sendMessage(token, sessionId, message);
+      
+      if (response.action === 'replan' || response.needs_replan) {
+        addEvent({ type: 'status', message: 'Replanning based on your input...' });
+        setStatus('planning');
+        // Trigger replan stream
+        await streamSSE(`/stream/sessions/${sessionId}/plan`);
+      } else {
+        addEvent({ type: 'status', message: response.message || 'Message received' });
+      }
+      
+      refreshSessions();
+    } catch (err) {
+      addEvent({ type: 'error', error: `Failed to send message: ${err.message}` });
+    }
   };
 
   const getEventIcon = (type) => {
@@ -565,6 +600,32 @@ export default function AgentPanel({ token, user }) {
           )}
           <div ref={eventsEndRef} />
         </div>
+        
+        {/* Message Input - Always visible when session exists */}
+        {sessionId && (
+          <div className="p-3 border-t border-gray-700">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={messageInput}
+                onChange={(e) => setMessageInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                placeholder="Send a message to interrupt and replan..."
+                className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
+              />
+              <button
+                onClick={handleSendMessage}
+                disabled={!messageInput.trim()}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded text-sm font-medium transition-colors"
+              >
+                💬 Send
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mt-1">
+              Send a message to interrupt execution and trigger replanning
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Results Panel - Full Width Below */}
