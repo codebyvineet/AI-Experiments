@@ -131,26 +131,26 @@ def approval_node(state: AgentState) -> Dict[str, Any]:
 # EXECUTOR NODE (Fan-out for parallel execution)
 # ============================================================================
 
-def executor_dispatch(state: AgentState) -> List[Send]:
+async def executor_dispatch(state: AgentState) -> Dict[str, Any]:
     """
-    Dispatch tasks for parallel or sequential execution.
+    Dispatch tasks for execution.
     
-    This is the fan-out function that creates Send() calls
-    for parallel task execution in LangGraph.
+    For parallel execution, this node prepares tasks and the graph
+    handles them via Send() in conditional edges.
     """
     log = LogContext(logger, session_id=state["session_id"], agent="executor")
     
     # Check if approved
     if not state.get("approved", False):
         log.info("❌ Plan not approved, skipping execution")
-        return []
+        return {"status": "failed", "error": "Plan not approved"}
     
     plan = state.get("plan", [])
     current_step = state.get("current_step", 0)
     
     if current_step >= len(plan):
         log.info("✅ All steps completed")
-        return []
+        return {}
     
     step = plan[current_step]
     sub_tasks = step.get("sub_tasks", [])
@@ -159,10 +159,41 @@ def executor_dispatch(state: AgentState) -> List[Send]:
     log.info(f"📋 Dispatching step {current_step + 1}/{len(plan)}: {step.get('description')}")
     log.info(f"   Mode: {execution_mode}, Tasks: {len(sub_tasks)}")
     
-    # Create Send() calls for each task
-    sends = []
-    for i, task in enumerate(sub_tasks):
-        sends.append(Send("task_executor", {
+    # Update step status
+    step["status"] = "running"
+    
+    return {
+        "plan": plan,
+        "messages": [{
+            "role": "system",
+            "content": f"Starting step {current_step + 1}: {step.get('description')}",
+            "timestamp": datetime.utcnow().isoformat()
+        }]
+    }
+
+
+def create_task_sends(state: AgentState) -> List[Send]:
+    """
+    Create Send() objects for parallel task execution.
+    
+    This is used as a conditional edge function that returns
+    Send() objects to spawn parallel task executors.
+    """
+    plan = state.get("plan", [])
+    current_step = state.get("current_step", 0)
+    
+    if current_step >= len(plan):
+        return []
+    
+    step = plan[current_step]
+    sub_tasks = step.get("sub_tasks", [])
+    
+    if not sub_tasks:
+        return []
+    
+    # Create Send() for each task
+    return [
+        Send("task_executor", {
             "session_id": state["session_id"],
             "token": state["token"],
             "step_index": current_step,
@@ -170,9 +201,9 @@ def executor_dispatch(state: AgentState) -> List[Send]:
             "task": task,
             "goal": state["goal"],
             "step_description": step.get("description", "")
-        }))
-    
-    return sends
+        })
+        for i, task in enumerate(sub_tasks)
+    ]
 
 
 async def task_executor_node(task_state: Dict[str, Any]) -> Dict[str, Any]:

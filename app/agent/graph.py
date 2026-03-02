@@ -26,7 +26,8 @@ from app.agent.nodes import (
     step_aggregator_node,
     summary_node,
     should_continue,
-    check_approval
+    check_approval,
+    create_task_sends
 )
 from app.config.settings import get_settings
 from app.config.logging_config import get_logger, LogContext
@@ -90,6 +91,7 @@ class LangGraphOrchestrator:
         # Add nodes
         builder.add_node("planner", planner_node)
         builder.add_node("approval", approval_node)
+        builder.add_node("executor_dispatch", executor_dispatch)  # Fan-out node
         builder.add_node("task_executor", task_executor_node)
         builder.add_node("aggregator", step_aggregator_node)
         builder.add_node("summary", summary_node)
@@ -105,10 +107,10 @@ class LangGraphOrchestrator:
             {"executor": "executor_dispatch", "summary": "summary"}
         )
         
-        # Fan-out to parallel task execution
+        # From executor_dispatch, fan out to task_executors via Send()
         builder.add_conditional_edges(
             "executor_dispatch",
-            executor_dispatch  # Returns List[Send]
+            create_task_sends  # Returns List[Send] for parallel execution
         )
         
         # After task execution, aggregate results
