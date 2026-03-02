@@ -229,6 +229,8 @@ Important rules:
 6. Each step should have 2-4 sub-tasks
 7. Be specific about which MCP tools each task will use
 8. Do NOT check or mention user permissions - just plan the best approach
+9. Do NOT use template syntax like {{{{steps[x].output}}}} - each task receives previous results automatically via context
+10. For tool_params, use actual values from the user's request, NOT placeholders or references to other steps
 
 Respond ONLY with valid JSON, no markdown or explanation.
 """
