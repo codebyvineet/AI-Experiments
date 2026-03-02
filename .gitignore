@@ -90,3 +90,4 @@ gcp-credentials*.json
 # Node.js
 node_modules/
 frontend/dist/
+*.png
