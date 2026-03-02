@@ -224,6 +224,217 @@ tools = await client.get_tools()
 
 ---
 
+## Multi-Agent Parallel Execution Deep Dive
+
+### The Core Question: How Do 4 Agents Run in Parallel?
+
+When you need to create 4 items (and don't have bulk_create), you need 4 parallel agents. Here's how different systems handle this:
+
+### How Popular Agents Do It
+
+#### 1. Claude (Anthropic) - Multi-Agent Research System
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                     LEAD ORCHESTRATOR AGENT                               │
+│                    (Claude Opus 4 - Planning)                             │
+│                                                                           │
+│   User Goal: "Create 4 items"                                            │
+│              │                                                            │
+│              ▼                                                            │
+│   ┌─────────────────────────────────────────────────────────────────┐    │
+│   │           DECOMPOSE INTO PARALLEL SUBTASKS                       │    │
+│   │   Task 1: create_item("Alice")  │  Task 2: create_item("Bob")   │    │
+│   │   Task 3: create_item("Carol")  │  Task 4: create_item("Dave")  │    │
+│   └─────────────────────────────────────────────────────────────────┘    │
+│                                │                                          │
+│                                ▼                                          │
+│   ┌─────────────────────────────────────────────────────────────────┐    │
+│   │              SPAWN 4 PARALLEL SUBAGENTS                          │    │
+│   │   Each gets its OWN context window (isolated)                    │    │
+│   │   Each can use tools independently                               │    │
+│   │   All run CONCURRENTLY via asyncio                               │    │
+│   └─────────────────────────────────────────────────────────────────┘    │
+│                                │                                          │
+│                                ▼                                          │
+│   ┌─────────────────────────────────────────────────────────────────┐    │
+│   │              AGGREGATE RESULTS                                   │    │
+│   │   Lead agent collects all 4 results                              │    │
+│   │   Synthesizes into unified response                              │    │
+│   └─────────────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Insight**: Claude uses **asyncio concurrency** (not multiprocessing). Each subagent is an independent Claude instance with isolated context. They run in parallel via async/await.
+
+#### 2. GitHub Copilot - `/fleet` Command
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    AGENTIC HARNESS (Orchestrator)                         │
+│                                                                           │
+│   /fleet "Create 4 items: Alice, Bob, Carol, Dave"                       │
+│              │                                                            │
+│              ▼                                                            │
+│   ┌─────────────────────────────────────────────────────────────────┐    │
+│   │           TASK DECOMPOSITION & DEPENDENCY ANALYSIS               │    │
+│   │   • Identifies 4 independent subtasks (no dependencies)          │    │
+│   │   • Routes each to specialized "Task" agent                      │    │
+│   └─────────────────────────────────────────────────────────────────┘    │
+│                                │                                          │
+│                                ▼                                          │
+│   ┌─────────────────────────────────────────────────────────────────┐    │
+│   │              PARALLEL AGENT SPAWN                                │    │
+│   │                                                                  │    │
+│   │   ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐               │    │
+│   │   │Agent 1 │  │Agent 2 │  │Agent 3 │  │Agent 4 │               │    │
+│   │   │(Sonnet)│  │(Haiku) │  │(Sonnet)│  │(GPT-5) │               │    │
+│   │   │Alice   │  │Bob     │  │Carol   │  │Dave    │               │    │
+│   │   └────────┘  └────────┘  └────────┘  └────────┘               │    │
+│   │       │           │           │           │                     │    │
+│   │       └───────────┴───────────┴───────────┘                     │    │
+│   │                       │                                         │    │
+│   │              asyncio.gather() / concurrent.futures              │    │
+│   └─────────────────────────────────────────────────────────────────┘    │
+│                                │                                          │
+│                                ▼                                          │
+│   ┌─────────────────────────────────────────────────────────────────┐    │
+│   │              AGENT HQ (Mission Control)                          │    │
+│   │   • Real-time monitoring of all 4 agents                         │    │
+│   │   • Can pause/resume individual agents                           │    │
+│   │   • Aggregates results into unified PR                           │    │
+│   └─────────────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Insight**: GitHub Copilot can use **different LLM models** for different subagents (e.g., expensive Opus for planning, cheap Haiku for simple tasks).
+
+### LangGraph Parallel Execution: The `Send()` Pattern
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import Send
+from typing import Annotated, TypedDict
+import operator
+
+class AgentState(TypedDict):
+    goal: str
+    items_to_create: list[dict]  # e.g., [{"name": "Alice"}, {"name": "Bob"}, ...]
+    results: Annotated[list, operator.add]  # Reducer: merge results from parallel agents
+
+# Fan-out: Dispatch to parallel workers
+def dispatch_parallel_agents(state: AgentState) -> list[Send]:
+    """Spawn one agent per item to create."""
+    return [
+        Send("create_item_agent", {"item": item, "token": state["token"]})
+        for item in state["items_to_create"]
+    ]
+
+# Worker node: Each runs independently
+async def create_item_agent(state: dict) -> dict:
+    """Independent agent that creates one item."""
+    item = state["item"]
+    result = await mcp_client.call_tool("create_item", {
+        "name": item["name"],
+        "description": item.get("description", "")
+    })
+    return {"results": [result]}  # Returns to reducer
+
+# Build graph
+builder = StateGraph(AgentState)
+builder.add_node("create_item_agent", create_item_agent)
+builder.add_conditional_edges(START, dispatch_parallel_agents)
+builder.add_edge("create_item_agent", END)
+
+graph = builder.compile()
+
+# Execute: All 4 agents run in parallel!
+result = await graph.ainvoke({
+    "goal": "Create 4 items",
+    "items_to_create": [
+        {"name": "Alice"}, {"name": "Bob"}, 
+        {"name": "Carol"}, {"name": "Dave"}
+    ],
+    "token": user_token
+})
+# result["results"] = [item1, item2, item3, item4]
+```
+
+### Execution Model: Asyncio vs Multiprocessing
+
+| Aspect | asyncio (Default) | ProcessPoolExecutor |
+|--------|-------------------|---------------------|
+| **Use Case** | I/O-bound (API calls, DB) | CPU-bound (ML inference) |
+| **Our Case** | ✅ MCP tool calls are I/O | ❌ Not needed |
+| **How** | Event loop concurrency | Separate OS processes |
+| **GIL** | Single thread, blocked by CPU | Bypasses GIL |
+| **Memory** | Shared memory | Isolated per process |
+
+**For our use case (MCP tool calls)**: **asyncio is correct**. Making 4 HTTP calls to MCP server is I/O-bound, not CPU-bound.
+
+```python
+# LangGraph uses asyncio internally for parallel nodes
+# This is equivalent to:
+results = await asyncio.gather(
+    create_item_agent({"item": {"name": "Alice"}}),
+    create_item_agent({"item": {"name": "Bob"}}),
+    create_item_agent({"item": {"name": "Carol"}}),
+    create_item_agent({"item": {"name": "Dave"}}),
+)
+```
+
+### When to Use ProcessPoolExecutor
+
+If agents did **CPU-heavy work** (rare for MCP tools):
+
+```python
+from concurrent.futures import ProcessPoolExecutor
+import asyncio
+
+executor = ProcessPoolExecutor(max_workers=4)
+
+async def cpu_heavy_agent(state: dict):
+    """For CPU-bound work, offload to process pool."""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        executor,
+        heavy_computation,  # Runs in separate process
+        state["data"]
+    )
+    return {"results": [result]}
+```
+
+### LangGraph Concurrency Control
+
+```python
+# Limit parallel agents to prevent overwhelming resources
+graph = builder.compile(
+    checkpointer=checkpointer,
+    # Max 10 parallel agents at once (throttling)
+    interrupt_before=["approval"],
+)
+
+# Or at runtime:
+async for event in graph.astream(
+    input_state,
+    config={"max_concurrency": 4}  # Only 4 agents at a time
+):
+    yield event
+```
+
+### Summary: Multi-Agent Parallelism
+
+| System | Parallelism Method | Orchestrator | Worker Isolation |
+|--------|-------------------|--------------|------------------|
+| **Claude** | asyncio + subagents | Lead Opus agent | Separate context windows |
+| **GitHub Copilot** | asyncio + fleet | Agentic harness | Separate CLI instances |
+| **LangGraph** | asyncio + `Send()` | StateGraph | Same process, isolated state |
+| **Our Current** | `asyncio.gather()` | Custom orchestrator | Same process |
+
+**Recommendation**: LangGraph's `Send()` pattern provides the same capability as Claude/Copilot with cleaner code.
+
+---
+
 ## Current State Analysis
 
 ### What We Have (Custom Implementation)
