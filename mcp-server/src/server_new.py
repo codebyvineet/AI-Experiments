@@ -111,9 +111,7 @@ async def backend_request(
 
 # Create FastMCP server
 mcp = FastMCP(
-    name="AI-Experiments MCP Server",
-    version="2.0.0",
-    description="MCP Server for AI-Experiments - provides CRUD tools for items management"
+    name="AI-Experiments MCP Server"
 )
 
 

@@ -10,7 +10,6 @@ from app.models.schemas import (
     Item,
     ItemCreate,
     ItemUpdate,
-    AgentState,
     MCPRequest,
     MCPResponse,
 )
@@ -25,7 +24,6 @@ __all__ = [
     "Item",
     "ItemCreate",
     "ItemUpdate",
-    "AgentState",
     "MCPRequest",
     "MCPResponse",
 ]

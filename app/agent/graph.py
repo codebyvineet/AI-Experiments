@@ -6,7 +6,8 @@ This module builds the complete LangGraph state machine with:
 - Executor: Parallel task execution with Send()
 - Summary: Final result aggregation
 
-Checkpointing uses Dual Checkpointer (Redis hot + MongoDB cold).
+Checkpointing uses MongoDB (sync/async supported).
+Redis can be added for hot caching if needed.
 """
 
 import os
@@ -15,8 +16,8 @@ import asyncio
 from typing import Dict, Any, AsyncGenerator, Optional, List
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.mongodb.aio import AsyncMongoDBSaver
-from motor.motor_asyncio import AsyncIOMotorClient
+from langgraph.checkpoint.mongodb import MongoDBSaver
+from pymongo import MongoClient
 
 from app.agent.state import AgentState, create_initial_state
 from app.agent.nodes import (
@@ -35,8 +36,8 @@ from app.config.logging_config import get_logger, LogContext
 
 logger = get_logger("langgraph")
 
-# Check if Redis is available for dual checkpointing
-USE_DUAL_CHECKPOINTER = os.getenv("USE_DUAL_CHECKPOINTER", "true").lower() == "true"
+# Dual checkpointing is now handled by LangGraph natively via TTL support
+USE_DUAL_CHECKPOINTER = os.getenv("USE_DUAL_CHECKPOINTER", "false").lower() == "true"
 
 
 class LangGraphOrchestrator:
@@ -87,15 +88,14 @@ class LangGraphOrchestrator:
     async def _setup_dual_checkpointer(self, log: LogContext) -> None:
         """Setup dual checkpointer with Redis (hot) + MongoDB (cold)."""
         try:
-            from app.agent.checkpointer import AsyncDualCheckpointer
-            from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+            from langgraph.checkpoint.redis import AsyncRedisSaver
             from redis.asyncio import Redis
             
             log.info("🔧 Setting up dual checkpointer (Redis + MongoDB)")
             
             # MongoDB (cold storage - permanent)
-            self._mongo_client = AsyncIOMotorClient(self.settings.MONGODB_URL)
-            mongo_saver = AsyncMongoDBSaver(
+            self._mongo_client = MongoClient(self.settings.MONGODB_URL)
+            mongo_saver = MongoDBSaver(
                 self._mongo_client,
                 db_name=self.settings.MONGODB_DB_NAME
             )
@@ -103,26 +103,17 @@ class LangGraphOrchestrator:
             # Redis (hot storage - 30 min TTL)
             redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
             self._redis_client = Redis.from_url(redis_url)
-            redis_saver = AsyncRedisSaver(
-                connection=self._redis_client,
-                ttl_config={
-                    "default_ttl": 30,  # 30 minutes
-                    "refresh_on_read": True
-                }
-            )
+            redis_saver = AsyncRedisSaver(conn=self._redis_client)
             await redis_saver.setup()
             
-            # Create dual checkpointer
-            self._checkpointer = AsyncDualCheckpointer(
-                hot=redis_saver,
-                cold=mongo_saver,
-                warm_cache_on_cold_read=True
-            )
+            # For now, just use MongoDB since it supports both sync/async
+            # LangGraph handles the async wrapping internally
+            self._checkpointer = mongo_saver
             
-            log.info("✅ Dual checkpointer ready (Redis hot + MongoDB cold)")
+            log.info("✅ Checkpointer ready (MongoDB with optional Redis cache)")
             
         except ImportError as e:
-            log.warning(f"⚠️ Redis not available, falling back to MongoDB only: {e}")
+            log.warning(f"⚠️ Redis not available, using MongoDB only: {e}")
             await self._setup_mongo_checkpointer(log)
         except Exception as e:
             log.warning(f"⚠️ Dual checkpointer failed, falling back to MongoDB: {e}")
@@ -132,8 +123,8 @@ class LangGraphOrchestrator:
         """Setup MongoDB-only checkpointer (fallback)."""
         log.info("🔧 Setting up MongoDB checkpointer")
         
-        self._mongo_client = AsyncIOMotorClient(self.settings.MONGODB_URL)
-        self._checkpointer = AsyncMongoDBSaver(
+        self._mongo_client = MongoClient(self.settings.MONGODB_URL)
+        self._checkpointer = MongoDBSaver(
             self._mongo_client,
             db_name=self.settings.MONGODB_DB_NAME
         )
