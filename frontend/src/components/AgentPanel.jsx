@@ -759,7 +759,7 @@ export default function AgentPanel({ token, user }) {
                     <div className="flex items-center justify-between mb-2">
                       <span className="font-medium text-blue-400">{result.task}</span>
                       <span className="text-xs text-gray-500">
-                        {new Date(result.timestamp).toLocaleTimeString()}
+                        {result.timestamp ? new Date(result.timestamp).toLocaleTimeString() : ''}
                       </span>
                     </div>
                     <div className="bg-gray-900/50 rounded p-3 overflow-x-auto">
