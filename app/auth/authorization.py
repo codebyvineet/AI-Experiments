@@ -176,6 +176,21 @@ def require_role(required_role: UserRole):
     return role_checker
 
 
+async def create_mcp_token(user: TokenData, expires_minutes: int = 60) -> str:
+    """
+    Create a token for MCP server authorization.
+    
+    This token is passed to the MCP server for tool calls,
+    allowing it to authorize operations based on user permissions.
+    """
+    return create_access_token(
+        user_id=user.user_id,
+        username=user.username or "unknown",
+        role=user.role or UserRole.USER,
+        expires_delta=timedelta(minutes=expires_minutes)
+    )
+
+
 class AuthorizationTool:
     """Authorization tool for generating and managing user tokens."""
     

@@ -1,4 +1,7 @@
-"""Server-Sent Events (SSE) endpoint for real-time agent streaming."""
+"""Server-Sent Events (SSE) endpoint for real-time agent streaming.
+
+All streaming uses the LangGraph orchestrator for consistent behavior.
+"""
 
 import json
 import asyncio
@@ -10,9 +13,9 @@ from pydantic import BaseModel
 
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from app.auth.authorization import get_current_user, get_current_user_with_token
+from app.auth.authorization import get_current_user, get_current_user_with_token, create_mcp_token
 from app.models import TokenData
-from app.agent.multi_agent import multi_agent_orchestrator
+from app.agent.graph import get_orchestrator
 from app.mcp.client import mcp_client
 from app.config.logging_config import get_logger, LogContext
 
@@ -48,7 +51,7 @@ async def create_streaming_session(
     request: CreateSessionRequest,
     auth_data: Tuple[TokenData, str] = Depends(get_current_user_with_token)
 ):
-    """Create a new multi-agent session."""
+    """Create a new LangGraph session with streaming support."""
     current_user, token = auth_data
     request_id = str(uuid.uuid4())[:8]
     log = LogContext(logger, request_id=request_id, user_id=current_user.user_id)
@@ -58,23 +61,27 @@ async def create_streaming_session(
         "permissions": current_user.permissions
     })
     
-    user_id = current_user.user_id
-    user_permissions = current_user.permissions or []
+    orchestrator = await get_orchestrator()
     
-    session = await multi_agent_orchestrator.create_session(
-        user_id=user_id, 
+    # Generate MCP token for tool calls
+    mcp_token = await create_mcp_token(current_user)
+    
+    session_id = await orchestrator.create_session(
+        user_id=current_user.user_id,
         goal=request.goal,
-        user_permissions=user_permissions,
-        token=token  # Pass token for MCP tool calls during execution
+        token=mcp_token
     )
     
-    log.info(f"📤 Response: Session created", data={"session_id": session.session_id})
+    # Get initial state
+    state = await orchestrator.get_session_state(session_id)
+    
+    log.info(f"📤 Response: Session created", data={"session_id": session_id})
     
     return {
-        "session_id": session.session_id,
-        "goal": session.goal,
-        "status": session.status,
-        "created_at": session.created_at.isoformat()
+        "session_id": session_id,
+        "goal": request.goal,
+        "status": state.get("status", "created") if state else "created",
+        "plan": state.get("plan", []) if state else []
     }
 
 
@@ -86,23 +93,40 @@ async def stream_plan_generation(
     """
     Stream plan generation via Server-Sent Events.
     
-    Returns SSE stream with events:
-    - {"type": "status", "message": "..."}
-    - {"type": "thinking", "agent": "planning", "content": "..."}
-    - {"type": "plan_step", "step_number": N, "step": {...}}
-    - {"type": "plan_complete", "plan": [...]}
+    Note: Plan is generated during session creation in LangGraph.
+    This endpoint streams the existing plan state.
     """
     request_id = str(uuid.uuid4())[:8]
     log = LogContext(logger, request_id=request_id, session_id=session_id, user_id=current_user.user_id)
     
-    log.info(f"📥 Request: Stream plan generation (SSE)")
+    log.info(f"📥 Request: Stream plan (SSE)")
+    
+    orchestrator = await get_orchestrator()
+    state = await orchestrator.get_session_state(session_id)
+    
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
     
     async def generate():
-        async for event in multi_agent_orchestrator.generate_plan(session_id):
-            log.debug(f"📡 SSE Event: {event.get('type')}", data=event)
-            yield event
+        # Send plan status
+        yield {"type": "status", "status": state.get("status", "unknown")}
+        
+        # Send plan steps
+        for i, step in enumerate(state.get("plan", [])):
+            yield {
+                "type": "plan_step",
+                "step_number": i + 1,
+                "step": step
+            }
+        
+        # Send completion
+        yield {
+            "type": "plan_complete",
+            "plan": state.get("plan", []),
+            "total_steps": len(state.get("plan", []))
+        }
     
-    log.info(f"📤 Response: Starting SSE stream for plan generation")
+    log.info(f"📤 Response: Starting SSE stream for plan")
     
     return StreamingResponse(
         event_generator(generate()),
@@ -122,8 +146,18 @@ async def update_session_plan(
     current_user: TokenData = Depends(get_current_user)
 ):
     """Update the plan for a session (user modification)."""
-    result = await multi_agent_orchestrator.update_plan(session_id, request.plan)
-    return result
+    # Note: LangGraph handles plan updates via interrupt/replan
+    # This endpoint is for backward compatibility
+    orchestrator = await get_orchestrator()
+    
+    # Use the replan feature
+    mcp_token = await create_mcp_token(current_user)
+    
+    return {
+        "session_id": session_id,
+        "message": "Use POST /agent/v2/sessions/{id}/replan for plan modifications",
+        "plan": request.plan
+    }
 
 
 @router.get("/sessions/{session_id}/execute")
@@ -134,25 +168,29 @@ async def stream_plan_execution(
     """
     Stream plan execution via Server-Sent Events.
     
-    Returns SSE stream with events:
-    - {"type": "status", "status": "executing"}
-    - {"type": "step_start", "step_index": N, "step": {...}}
-    - {"type": "parallel_start", "task_count": N}
-    - {"type": "task_start/task_complete", "task": {...}}
-    - {"type": "step_complete", "step_index": N}
-    - {"type": "execution_complete", "summary": {...}}
+    Uses LangGraph orchestrator for execution with automatic checkpointing.
     """
     request_id = str(uuid.uuid4())[:8]
     log = LogContext(logger, request_id=request_id, session_id=session_id, user_id=current_user.user_id)
     
     log.info(f"📥 Request: Stream plan execution (SSE)")
     
+    orchestrator = await get_orchestrator()
+    
+    # Verify access
+    state = await orchestrator.get_session_state(session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if state.get("user_id") != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
     async def generate():
-        async for event in multi_agent_orchestrator.execute_plan(session_id):
+        async for event in orchestrator.stream_session(session_id):
             log.debug(f"📡 SSE Event: {event.get('type')}", data=event)
             yield event
     
-    log.info(f"📤 Response: Starting SSE stream for plan execution")
+    log.info(f"📤 Response: Starting SSE stream for execution")
     
     return StreamingResponse(
         event_generator(generate()),
@@ -170,20 +208,14 @@ async def get_session_state(
     session_id: str,
     current_user: TokenData = Depends(get_current_user)
 ):
-    """Get current session state."""
-    session = await multi_agent_orchestrator.get_session(session_id)
-    if not session:
+    """Get current session state from LangGraph."""
+    orchestrator = await get_orchestrator()
+    state = await orchestrator.get_session_state(session_id)
+    
+    if not state:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    return {
-        "session_id": session.session_id,
-        "goal": session.goal,
-        "plan": session.plan,
-        "messages": session.messages,
-        "status": session.status,
-        "created_at": session.created_at.isoformat(),
-        "updated_at": session.updated_at.isoformat()
-    }
+    return state
 
 
 @router.get("/sessions")
@@ -191,8 +223,8 @@ async def list_sessions(
     current_user: TokenData = Depends(get_current_user)
 ):
     """List all sessions for current user."""
-    user_id = current_user.user_id
-    sessions = multi_agent_orchestrator.get_all_sessions(user_id)
+    orchestrator = await get_orchestrator()
+    sessions = await orchestrator.list_user_sessions(current_user.user_id)
     return {"sessions": sessions}
 
 
@@ -202,9 +234,19 @@ async def add_message(
     content: str = Query(..., description="Message content"),
     current_user: TokenData = Depends(get_current_user)
 ):
-    """Add a user message to the session."""
-    message = await multi_agent_orchestrator.add_message(session_id, "user", content)
-    return {"message": message}
+    """Add a user message - triggers re-plan if needed."""
+    # In LangGraph, messages can trigger re-planning
+    orchestrator = await get_orchestrator()
+    mcp_token = await create_mcp_token(current_user)
+    
+    # Use replan feature with the new message as context
+    result = await orchestrator.interrupt_and_replan(
+        session_id,
+        content,  # New message becomes the new goal/modification
+        mcp_token
+    )
+    
+    return {"message": "Message processed", "result": result}
 
 
 @router.get("/mcp/tools")
@@ -220,19 +262,13 @@ async def get_mcp_tools(
         # Get tools from external MCP Server
         tools = await mcp_client.list_tools(token=credentials.credentials)
         
-        # Filter by user permissions
-        permissions = current_user.permissions or []
         accessible_tools = []
-        
         for tool in tools:
-            # Check if user has required permission (simplified check)
-            tool_name = tool.get("name", "")
-            accessible = True  # MCP Server handles permission validation on call
             accessible_tools.append({
-                "name": tool_name,
+                "name": tool.get("name", ""),
                 "description": tool.get("description", ""),
                 "inputSchema": tool.get("inputSchema", {}),
-                "accessible": accessible
+                "accessible": True  # MCP Server handles permission validation on call
             })
         
         log.info(f"📤 Response: {len(accessible_tools)} tools available")
@@ -254,7 +290,6 @@ async def call_mcp_tool(
     log.info(f"📥 Request: Call MCP tool '{tool_name}'", data={"args": args})
     
     try:
-        # Call tool via external MCP Server
         result = await mcp_client.call_tool(
             tool_name=tool_name,
             arguments=args,

@@ -1,4 +1,11 @@
-"""Agent API routes for LangGraph agent with plan mode."""
+"""Agent API routes for LangGraph orchestrator.
+
+All agent functionality uses LangGraph framework with:
+- Automatic checkpointing (Redis hot + MongoDB cold)
+- Human-in-the-loop approval via interrupt()
+- Parallel task execution via Send()
+- Session resume, re-plan, and stop features
+"""
 
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, status, Depends
@@ -7,16 +14,10 @@ from pydantic import BaseModel
 import json
 
 from app.auth import get_current_user, require_permission, create_mcp_token
-from app.agent import plan_mode_agent
 from app.agent.graph import get_orchestrator
 from app.models import TokenData
 
 router = APIRouter(prefix="/agent", tags=["agent"])
-
-
-class PlanModeRequest(BaseModel):
-    """Plan mode request model."""
-    goal: str
 
 
 class GoalRequest(BaseModel):
@@ -30,36 +31,25 @@ class ApprovalRequest(BaseModel):
     approved: bool
 
 
-class MessageRequest(BaseModel):
-    """Message request model."""
-    role: str = "user"
-    content: str
-
-
 class ReplanRequest(BaseModel):
     """Re-plan request model."""
     new_goal: str
 
 
-class ArchiveRequest(BaseModel):
-    """Archive request model."""
-    ttl_days: int = 30
-
-
 # ============================================================================
-# NEW: LangGraph Orchestrator Endpoints
+# LangGraph Orchestrator Endpoints (V2 API)
 # ============================================================================
 
 @router.post("/v2/sessions")
-async def create_session_v2(
+async def create_session(
     request: GoalRequest,
     current_user: TokenData = Depends(require_permission("agent:execute"))
 ):
     """
     Create a new LangGraph session and generate plan.
     
-    This uses the new LangGraph-based orchestrator with:
-    - Automatic checkpointing to MongoDB
+    This uses the LangGraph-based orchestrator with:
+    - Automatic checkpointing (Redis hot + MongoDB cold)
     - Human-in-the-loop approval via interrupt()
     - Parallel task execution via Send()
     
@@ -90,7 +80,7 @@ async def create_session_v2(
 
 
 @router.get("/v2/sessions/{session_id}")
-async def get_session_v2(
+async def get_session(
     session_id: str,
     current_user: TokenData = Depends(require_permission("agent:execute"))
 ):
@@ -116,7 +106,7 @@ async def get_session_v2(
 
 
 @router.post("/v2/sessions/{session_id}/approve")
-async def approve_plan_v2(
+async def approve_plan(
     session_id: str,
     request: ApprovalRequest,
     current_user: TokenData = Depends(require_permission("agent:execute"))
@@ -155,7 +145,7 @@ async def approve_plan_v2(
 
 
 @router.get("/v2/sessions/{session_id}/stream")
-async def stream_session_v2(
+async def stream_session(
     session_id: str,
     current_user: TokenData = Depends(require_permission("agent:execute"))
 ):
@@ -200,7 +190,7 @@ async def stream_session_v2(
 
 
 @router.get("/v2/sessions")
-async def list_sessions_v2(
+async def list_sessions(
     current_user: TokenData = Depends(require_permission("agent:execute"))
 ):
     """
@@ -221,7 +211,7 @@ async def list_sessions_v2(
 
 
 @router.get("/v2/sessions/{session_id}/resume")
-async def resume_session_v2(
+async def resume_session(
     session_id: str,
     current_user: TokenData = Depends(require_permission("agent:execute"))
 ):
@@ -255,7 +245,7 @@ async def resume_session_v2(
 
 
 @router.post("/v2/sessions/{session_id}/replan")
-async def replan_session_v2(
+async def replan_session(
     session_id: str,
     request: ReplanRequest,
     current_user: TokenData = Depends(require_permission("agent:execute"))
@@ -300,7 +290,7 @@ async def replan_session_v2(
 
 
 @router.post("/v2/sessions/{session_id}/stop")
-async def stop_session_v2(
+async def stop_session(
     session_id: str,
     current_user: TokenData = Depends(require_permission("agent:execute"))
 ):
@@ -340,7 +330,7 @@ async def stop_session_v2(
 
 
 @router.post("/v2/sessions/{session_id}/retry")
-async def retry_session_v2(
+async def retry_session(
     session_id: str,
     current_user: TokenData = Depends(require_permission("agent:execute"))
 ):
@@ -376,131 +366,27 @@ async def retry_session_v2(
 
 
 # ============================================================================
-# LEGACY: Original Plan Mode Agent Endpoints
+# Backward Compatibility: Redirect Legacy Routes to V2
 # ============================================================================
 
-
 @router.post("/sessions")
-async def create_session(
+async def create_session_legacy(
     current_user: TokenData = Depends(require_permission("agent:execute"))
 ):
-    """Create a new agent session."""
-    session_id = await plan_mode_agent.create_session(current_user.user_id)
-    return {
-        "session_id": session_id,
-        "user_id": current_user.user_id,
-        "status": "created"
-    }
+    """[DEPRECATED] Use POST /agent/v2/sessions instead."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="This endpoint is deprecated. Use POST /agent/v2/sessions with {'goal': '...'}"
+    )
 
 
 @router.get("/sessions/{session_id}")
-async def get_session_state(
+async def get_session_legacy(
     session_id: str,
     current_user: TokenData = Depends(require_permission("agent:execute"))
 ):
-    """Get the current state of an agent session."""
-    try:
-        state = await plan_mode_agent.get_session_state(session_id)
-        
-        # Verify ownership
-        if state["user_id"] != current_user.user_id:
-            # Admin can view all sessions
-            if "agent:admin" not in (current_user.permissions or []):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="You don't have access to this session"
-                )
-        
-        return state
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
-
-
-@router.post("/sessions/{session_id}/plan")
-async def enter_plan_mode(
-    session_id: str,
-    request: PlanModeRequest,
-    current_user: TokenData = Depends(require_permission("agent:execute"))
-):
-    """Enter planning mode and generate a plan for a goal."""
-    try:
-        result = await plan_mode_agent.enter_plan_mode(session_id, request.goal)
-        return result
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
-
-
-@router.post("/sessions/{session_id}/execute-step")
-async def execute_step(
-    session_id: str,
-    current_user: TokenData = Depends(require_permission("agent:execute"))
-):
-    """Execute the next step in the plan."""
-    try:
-        result = await plan_mode_agent.execute_step(session_id)
-        return result
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
-
-
-@router.post("/sessions/{session_id}/execute-all")
-async def execute_all_steps(
-    session_id: str,
-    current_user: TokenData = Depends(require_permission("agent:execute"))
-):
-    """Execute all remaining steps in the plan."""
-    try:
-        result = await plan_mode_agent.execute_all_steps(session_id)
-        return result
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
-
-
-@router.post("/sessions/{session_id}/messages")
-async def add_message(
-    session_id: str,
-    request: MessageRequest,
-    current_user: TokenData = Depends(require_permission("agent:execute"))
-):
-    """Add a message to the agent session."""
-    try:
-        result = await plan_mode_agent.add_message(
-            session_id,
-            request.role,
-            request.content
-        )
-        return result
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
-
-
-@router.post("/sessions/{session_id}/archive")
-async def archive_session(
-    session_id: str,
-    request: ArchiveRequest = ArchiveRequest(),
-    current_user: TokenData = Depends(require_permission("agent:execute"))
-):
-    """Archive a session to cold storage."""
-    try:
-        result = await plan_mode_agent.archive_session(session_id, request.ttl_days)
-        return result
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
+    """[DEPRECATED] Use GET /agent/v2/sessions/{session_id} instead."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="This endpoint is deprecated. Use GET /agent/v2/sessions/{session_id}"
+    )
