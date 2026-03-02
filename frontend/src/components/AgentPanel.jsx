@@ -10,6 +10,7 @@ export default function AgentPanel({ token, user }) {
   const [finalSummary, setFinalSummary] = useState(null); // Final summary
   const [status, setStatus] = useState('idle'); // idle, planning, planned, executing, completed
   const [isStreaming, setIsStreaming] = useState(false);
+  const [previousSessions, setPreviousSessions] = useState([]);
   const eventsEndRef = useRef(null);
 
   // Note: Agent is accessible to all users. Authorization happens at tool execution level.
@@ -19,12 +20,39 @@ export default function AgentPanel({ token, user }) {
     eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [events]);
 
+  const restoreSession = async (sid) => {
+    try {
+      const session = await api.getSession(token, sid);
+      if (session && session.session_id) {
+        setSessionId(session.session_id);
+        setGoal(session.goal || '');
+        if (session.plan && Array.isArray(session.plan)) {
+          setPlan(session.plan);
+        }
+        // Map backend status to frontend status
+        const statusMap = {
+          'awaiting_approval': 'planned',
+          'executing': 'executing',
+          'completed': 'completed',
+          'planning': 'planning'
+        };
+        setStatus(statusMap[session.status] || 'idle');
+        addEvent({ type: 'session_restored', session_id: sid, message: `Restored session: ${session.status}` });
+      }
+    } catch (err) {
+      console.error('Failed to restore session:', err);
+    }
+  };
+
   const addEvent = (event) => {
     setEvents(prev => [...prev, { ...event, timestamp: new Date().toISOString() }]);
   };
 
-  const streamSSE = async (url) => {
+  const API_BASE = 'http://localhost:8000';
+  
+  const streamSSE = async (path) => {
     setIsStreaming(true);
+    const url = `${API_BASE}${path}`;
     try {
       const response = await fetch(url, {
         headers: { 'Authorization': `Bearer ${token}` }
@@ -162,6 +190,7 @@ export default function AgentPanel({ token, user }) {
     const icons = {
       user_action: '👤',
       session_created: '🆕',
+      session_restored: '🔄',
       status: '📢',
       thinking: '🤔',
       plan_step: '📝',
@@ -181,10 +210,70 @@ export default function AgentPanel({ token, user }) {
     return icons[type] || '📌';
   };
 
+  // Refresh sessions list
+  const refreshSessions = async () => {
+    try {
+      const sessions = await api.listSessions(token);
+      if (Array.isArray(sessions)) {
+        setPreviousSessions(sessions);
+      }
+    } catch (err) {
+      console.error('Failed to refresh sessions:', err);
+    }
+  };
+
+  // Load sessions periodically while streaming
+  useEffect(() => {
+    if (token) {
+      refreshSessions();
+      const interval = setInterval(refreshSessions, 10000); // Refresh every 10s
+      return () => clearInterval(interval);
+    }
+  }, [token]);
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* Left Panel - Controls & Plan */}
       <div className="space-y-4">
+        {/* Active Sessions Panel */}
+        {previousSessions.length > 0 && (
+          <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-sm font-medium text-gray-300">📂 Active Sessions ({previousSessions.length})</h4>
+              <button 
+                onClick={refreshSessions}
+                className="text-xs text-gray-500 hover:text-gray-300"
+              >
+                🔄 Refresh
+              </button>
+            </div>
+            <div className="space-y-1 max-h-32 overflow-y-auto">
+              {previousSessions.slice(0, 5).map((s) => (
+                <div 
+                  key={s.session_id}
+                  onClick={() => !isStreaming && restoreSession(s.session_id)}
+                  className={`flex items-center justify-between p-2 rounded cursor-pointer text-xs
+                    ${sessionId === s.session_id ? 'bg-blue-900/50 border border-blue-600' : 'bg-gray-700/50 hover:bg-gray-700'}
+                    ${isStreaming ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  <div className="flex-1 truncate">
+                    <span className="text-gray-400 mr-2">{s.session_id.slice(0, 8)}...</span>
+                    <span className="text-gray-300">{s.goal?.slice(0, 30) || 'No goal'}...</span>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded text-xs ml-2 ${
+                    s.status === 'awaiting_approval' ? 'bg-yellow-900 text-yellow-300' :
+                    s.status === 'executing' ? 'bg-blue-900 text-blue-300' :
+                    s.status === 'completed' ? 'bg-green-900 text-green-300' :
+                    'bg-gray-600 text-gray-300'
+                  }`}>
+                    {s.status === 'awaiting_approval' ? 'pending' : s.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Role Info Banner */}
         <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
           <div className="flex items-center justify-between text-sm">
@@ -316,23 +405,49 @@ export default function AgentPanel({ token, user }) {
               Events will appear here as the agent works...
             </p>
           ) : (
-            events.map((event, i) => (
-              <div 
-                key={i}
-                className={`text-sm p-2 rounded ${
-                  event.type === 'error' ? 'bg-red-900/30 text-red-300' :
-                  event.type.includes('complete') ? 'bg-green-900/30 text-green-300' :
-                  event.type === 'thinking' ? 'bg-yellow-900/30 text-yellow-300' :
-                  'bg-gray-700/50 text-gray-300'
-                }`}
-              >
-                <span className="mr-2">{getEventIcon(event.type)}</span>
-                <span className="text-gray-500 text-xs mr-2">
-                  {new Date(event.timestamp).toLocaleTimeString()}
-                </span>
-                {event.message || event.content || event.action || event.error || JSON.stringify(event)}
-              </div>
-            ))
+            events.map((event, i) => {
+              // Format event message based on type
+              const getMessage = () => {
+                if (event.message) return event.message;
+                if (event.content) return event.content;
+                if (event.action) return event.action;
+                if (event.error) return event.error;
+                
+                // Format specific event types
+                switch(event.type) {
+                  case 'session_created':
+                    return `Session created: ${event.session_id?.slice(0, 8)}...`;
+                  case 'plan_step':
+                    return `Step ${event.step_number}: ${event.step?.description || 'Planning step'}`;
+                  case 'plan_complete':
+                    return `Plan complete with ${event.total_steps || event.plan?.length || 0} steps`;
+                  case 'task_complete':
+                    return `Task completed: ${event.task_name || 'Task'}`;
+                  case 'execution_complete':
+                    return event.summary || 'Execution complete';
+                  default:
+                    return event.type || 'Event received';
+                }
+              };
+              
+              return (
+                <div 
+                  key={i}
+                  className={`text-sm p-2 rounded ${
+                    event.type === 'error' ? 'bg-red-900/30 text-red-300' :
+                    event.type?.includes('complete') ? 'bg-green-900/30 text-green-300' :
+                    event.type === 'thinking' ? 'bg-yellow-900/30 text-yellow-300' :
+                    'bg-gray-700/50 text-gray-300'
+                  }`}
+                >
+                  <span className="mr-2">{getEventIcon(event.type)}</span>
+                  <span className="text-gray-500 text-xs mr-2">
+                    {new Date(event.timestamp).toLocaleTimeString()}
+                  </span>
+                  {getMessage()}
+                </div>
+              );
+            })
           )}
           <div ref={eventsEndRef} />
         </div>

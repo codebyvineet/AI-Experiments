@@ -109,7 +109,9 @@ export const api = {
     const res = await fetch(`${API_BASE}/stream/sessions`, {
       headers: { 'Authorization': `Bearer ${token}` }
     });
-    return res.json();
+    const data = await res.json();
+    // API returns {sessions: [...]} - extract array
+    return data.sessions || [];
   },
 
   async updatePlan(token, sessionId, plan) {

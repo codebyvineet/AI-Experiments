@@ -13,6 +13,7 @@ Redis can be added for hot caching if needed.
 import os
 import uuid
 import asyncio
+from datetime import datetime, timezone
 from typing import Dict, Any, AsyncGenerator, Optional, List
 
 from langgraph.graph import StateGraph, START, END
@@ -185,6 +186,93 @@ class LangGraphOrchestrator:
         log.info("✅ LangGraph state machine built")
         return graph
     
+    def create_session_id(self, user_id: str, goal: str, token: str) -> tuple[str, Dict[str, Any], Dict[str, Any]]:
+        """
+        Create session ID and initial state without starting execution.
+        
+        Returns:
+            Tuple of (session_id, initial_state, config)
+        """
+        session_id = str(uuid.uuid4())
+        initial_state = create_initial_state(
+            session_id=session_id,
+            user_id=user_id,
+            goal=goal,
+            token=token
+        )
+        config = {"configurable": {"thread_id": session_id}}
+        return session_id, initial_state, config
+    
+    async def stream_graph(
+        self,
+        session_id: str,
+        initial_state: Dict[str, Any],
+        config: Dict[str, Any]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Stream graph execution using LangGraph's native astream.
+        
+        Uses 'updates' mode to get state changes after each node.
+        This is the framework-native way to stream progress.
+        """
+        log = LogContext(logger, session_id=session_id)
+        log.info(f"🚀 Starting streamed graph execution: {session_id}")
+        
+        yield {"type": "status", "status": "planning", "message": "Starting plan generation..."}
+        
+        try:
+            # Use LangGraph's native streaming with 'updates' mode
+            async for chunk in self._graph.astream(initial_state, config, stream_mode="updates"):
+                # chunk is dict of {node_name: node_output}
+                for node_name, output in chunk.items():
+                    log.info(f"📍 Node completed: {node_name}")
+                    
+                    if node_name == "planner":
+                        # Planner finished - emit plan events
+                        plan = output.get("plan", [])
+                        yield {"type": "thinking", "message": f"Generated {len(plan)} step plan"}
+                        for i, step in enumerate(plan):
+                            yield {"type": "plan_step", "step_number": i + 1, "step": step}
+                        yield {"type": "plan_complete", "plan": plan, "total_steps": len(plan)}
+                    
+                    elif node_name == "task_executor":
+                        # Task completed
+                        results = output.get("results", [])
+                        if results:
+                            latest = results[-1] if isinstance(results, list) else results
+                            yield {
+                                "type": "task_complete",
+                                "task_name": latest.get("task_name", "Task"),
+                                "result": latest.get("result", {}),
+                                "message": f"Completed: {latest.get('task_name', 'Task')}"
+                            }
+                    
+                    elif node_name == "summary":
+                        # Execution finished
+                        summary = output.get("summary", "")
+                        yield {
+                            "type": "execution_complete",
+                            "summary": summary,
+                            "message": "All tasks completed"
+                        }
+                        
+        except Exception as e:
+            error_str = str(e)
+            error_type = type(e).__name__
+            
+            # GraphInterrupt is expected when hitting approval checkpoint
+            if "interrupt" in error_str.lower() or "GraphInterrupt" in error_type:
+                log.info(f"⏸️ Graph paused at interrupt (approval checkpoint)")
+                # Get final state to send plan
+                final_state = await self.get_session_state(session_id)
+                if final_state and final_state.get("plan"):
+                    plan = final_state["plan"]
+                    if not any(e.get("type") == "plan_complete" for e in []):
+                        yield {"type": "plan_complete", "plan": plan, "total_steps": len(plan)}
+            else:
+                log.error(f"❌ Stream error: {e}")
+                yield {"type": "error", "error": error_str}
+    
     async def create_session(
         self,
         user_id: str,
@@ -192,33 +280,16 @@ class LangGraphOrchestrator:
         token: str
     ) -> str:
         """
-        Create a new agent session and start planning.
+        Create a new agent session and start planning (blocking).
         
-        Args:
-            user_id: User initiating the session
-            goal: The goal to accomplish
-            token: JWT token for MCP authorization
-            
-        Returns:
-            session_id (thread_id) for the session
+        For streaming, use create_session_id() + stream_graph() instead.
         """
         log = LogContext(logger, user_id=user_id)
         
-        session_id = str(uuid.uuid4())
-        log.info(f"📦 Creating new session: {session_id}")
+        session_id, initial_state, config = self.create_session_id(user_id, goal, token)
+        log.info(f"📦 Creating session: {session_id}")
         
-        # Create initial state
-        initial_state = create_initial_state(
-            session_id=session_id,
-            user_id=user_id,
-            goal=goal,
-            token=token
-        )
-        
-        # Config with thread_id for checkpointing
-        config = {"configurable": {"thread_id": session_id}}
-        
-        # Start graph execution (will pause at approval)
+        # Start graph execution (will pause at approval interrupt)
         try:
             await self._graph.ainvoke(initial_state, config)
         except Exception as e:
@@ -248,8 +319,8 @@ class LangGraphOrchestrator:
         """
         List all sessions for a user with their status.
         
-        Uses LangGraph checkpointer to find all threads for the user.
-        Returns resumable sessions (those with pending interrupts).
+        Uses MongoDB distinct query to find thread_ids, then uses
+        LangGraph checkpointer to get the latest state for each.
         """
         log = LogContext(logger, user_id=user_id)
         log.info(f"📋 Listing sessions for user: {user_id}")
@@ -257,30 +328,45 @@ class LangGraphOrchestrator:
         sessions = []
         
         try:
-            # Query MongoDB directly for user sessions
-            # LangGraph stores checkpoints with thread_id as key
             db = self._mongo_client[self.settings.mongodb_database]
             
-            # Find all checkpoints that belong to this user
-            async for doc in db.checkpoints.find(
-                {"channel_values.user_id": user_id}
-            ).sort("checkpoint_ts", -1).limit(50):
-                
-                thread_id = doc.get("thread_id")
-                channel_values = doc.get("channel_values", {})
-                
-                sessions.append({
-                    "session_id": thread_id,
-                    "status": channel_values.get("status", "unknown"),
-                    "goal": channel_values.get("goal", ""),
-                    "created_at": doc.get("checkpoint_ts"),
-                    "has_pending_interrupt": bool(doc.get("pending_sends")),
-                    "plan_steps": len(channel_values.get("plan", [])),
-                    "current_step": channel_values.get("current_step", 0),
-                    "can_resume": channel_values.get("status") in ["awaiting_approval", "executing"]
-                })
+            # Get distinct thread_ids from checkpoints (LangGraph stores these)
+            thread_ids = db.checkpoints.distinct("thread_id")
+            log.info(f"📋 Found {len(thread_ids)} total threads")
             
-            log.info(f"✅ Found {len(sessions)} sessions for user")
+            # For each thread, get the latest checkpoint and check if it belongs to user
+            for thread_id in thread_ids[:50]:  # Limit to 50
+                config = {"configurable": {"thread_id": thread_id}}
+                
+                try:
+                    # Use LangGraph's native method to get state
+                    state = await self._graph.aget_state(config)
+                    
+                    if state and state.values:
+                        values = state.values
+                        # Check if this session belongs to the user
+                        session_user_id = values.get("user_id", "")
+                        
+                        if session_user_id == user_id:
+                            sessions.append({
+                                "session_id": thread_id,
+                                "status": values.get("status", "unknown"),
+                                "goal": values.get("goal", ""),
+                                "created_at": None,  # Not easily available
+                                "has_pending_interrupt": bool(state.tasks),
+                                "plan_steps": len(values.get("plan", [])),
+                                "current_step": values.get("current_step", 0),
+                                "can_resume": values.get("status") in ["awaiting_approval", "executing"]
+                            })
+                except Exception as e:
+                    log.debug(f"Could not get state for thread {thread_id}: {e}")
+                    continue
+            
+            # Sort by status (active first)
+            status_order = {"executing": 0, "awaiting_approval": 1, "planning": 2, "completed": 3}
+            sessions.sort(key=lambda s: status_order.get(s["status"], 99))
+            
+            log.info(f"✅ Found {len(sessions)} sessions for user {user_id}")
             
         except Exception as e:
             log.error(f"❌ Failed to list sessions: {e}")
@@ -381,66 +467,104 @@ class LangGraphOrchestrator:
     
     async def stream_session(
         self,
-        session_id: str
+        session_id: str,
+        approve: bool = False
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream session events via SSE.
         
+        If approve=True, resumes past the approval interrupt.
+        Otherwise, just streams current state.
+        
         Yields events as the graph executes:
-        - planning: Plan generation events
         - approval: Waiting for approval
         - task_start: Task beginning
         - task_complete: Task finished
         - step_complete: Step finished
         - execution_complete: All done
         """
+        from langgraph.types import Command
+        
         log = LogContext(logger, session_id=session_id)
         config = {"configurable": {"thread_id": session_id}}
         
-        log.info(f"📡 Starting SSE stream for session: {session_id}")
+        log.info(f"📡 Starting SSE stream for session: {session_id}", data={"approve": approve})
+        
+        # Track already yielded results to avoid duplicates
+        yielded_results = set()
         
         try:
-            async for event in self._graph.astream(
-                None,  # Resume from checkpoint
-                config,
-                stream_mode="values"
-            ):
-                # Convert LangGraph event to our SSE format
-                state = event
+            # Check current state first
+            state = await self.get_session_state(session_id)
+            
+            if not state:
+                yield {"type": "error", "error": "Session not found"}
+                return
+            
+            # If approving and state is awaiting_approval, resume with approval
+            if approve and state.get("status") == "awaiting_approval":
+                log.info(f"✅ Resuming from approval interrupt")
+                yield {"type": "status", "status": "executing", "message": "Plan approved. Starting execution..."}
                 
-                if state.get("status") == "awaiting_approval":
+                # Use Command(resume=...) to resume past the interrupt
+                async for event in self._graph.astream(
+                    Command(resume={"approved": True}),
+                    config,
+                    stream_mode="values"
+                ):
+                    # Convert LangGraph event to our SSE format
+                    event_state = event
+                    
+                    if event_state.get("status") == "executing":
+                        current_step = event_state.get("current_step", 0)
+                        total_steps = len(event_state.get("plan", []))
+                        yield {
+                            "type": "step_start",
+                            "step": current_step,
+                            "total_steps": total_steps,
+                            "message": f"Executing step {current_step + 1} of {total_steps}"
+                        }
+                    elif event_state.get("status") == "completed":
+                        yield {
+                            "type": "execution_complete",
+                            "summary": event_state.get("summary", {}),
+                            "message": "Execution complete"
+                        }
+                    elif event_state.get("status") == "failed":
+                        yield {
+                            "type": "error",
+                            "error": event_state.get("error", "Unknown error"),
+                            "message": "Execution failed"
+                        }
+                    
+                    # Yield task results as they come in (deduplicated)
+                    for result in event_state.get("results", []):
+                        result_val = result.get('result', '')
+                        # Convert to string for deduplication key
+                        result_str = str(result_val)[:50] if result_val else ''
+                        result_key = f"{result.get('task_name')}_{result_str}"
+                        if result_key not in yielded_results:
+                            yielded_results.add(result_key)
+                            yield {
+                                "type": "task_complete",
+                                "task": result.get("task_name"),
+                                "status": result.get("status"),
+                                "result": result.get("result"),
+                                "duration_ms": result.get("duration_ms")
+                            }
+            else:
+                # Not approving - just yield current state
+                yield {
+                    "type": "status",
+                    "status": state.get("status", "unknown"),
+                    "message": f"Session status: {state.get('status')}"
+                }
+                
+                if state.get("plan"):
                     yield {
                         "type": "plan_complete",
                         "plan": state.get("plan", []),
-                        "message": "Plan generated. Awaiting approval."
-                    }
-                elif state.get("status") == "executing":
-                    yield {
-                        "type": "status",
-                        "status": "executing",
-                        "message": "Executing plan..."
-                    }
-                elif state.get("status") == "completed":
-                    yield {
-                        "type": "execution_complete",
-                        "summary": state.get("summary", {}),
-                        "message": "Execution complete"
-                    }
-                elif state.get("status") == "failed":
-                    yield {
-                        "type": "error",
-                        "error": state.get("error", "Unknown error"),
-                        "message": "Execution failed"
-                    }
-                
-                # Yield task results as they come in
-                for result in state.get("results", []):
-                    yield {
-                        "type": "task_complete",
-                        "task": result.get("task_name"),
-                        "status": result.get("status"),
-                        "result": result.get("result"),
-                        "duration_ms": result.get("duration_ms")
+                        "message": "Plan available"
                     }
                     
         except Exception as e:

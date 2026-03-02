@@ -51,7 +51,12 @@ async def create_streaming_session(
     request: CreateSessionRequest,
     auth_data: Tuple[TokenData, str] = Depends(get_current_user_with_token)
 ):
-    """Create a new LangGraph session with streaming support."""
+    """
+    Create a new LangGraph session - returns immediately with session ID.
+    
+    Client should then connect to GET /sessions/{id}/plan SSE to stream planning progress.
+    This avoids blocking the POST request during AI plan generation (~20-30s).
+    """
     current_user, token = auth_data
     request_id = str(uuid.uuid4())[:8]
     log = LogContext(logger, request_id=request_id, user_id=current_user.user_id)
@@ -66,23 +71,34 @@ async def create_streaming_session(
     # Generate MCP token for tool calls
     mcp_token = await create_mcp_token(current_user)
     
-    session_id = await orchestrator.create_session(
+    # Just create session ID and initial state - don't start graph yet
+    session_id, initial_state, config = orchestrator.create_session_id(
         user_id=current_user.user_id,
         goal=request.goal,
         token=mcp_token
     )
     
-    # Get initial state
-    state = await orchestrator.get_session_state(session_id)
+    # Store session info for later retrieval (before streaming starts)
+    # We'll store in a simple in-memory dict keyed by session_id
+    _pending_sessions[session_id] = {
+        "initial_state": initial_state,
+        "config": config,
+        "user_id": current_user.user_id,
+        "goal": request.goal
+    }
     
-    log.info(f"📤 Response: Session created", data={"session_id": session_id})
+    log.info(f"📤 Response: Session created (pending planning)", data={"session_id": session_id})
     
     return {
         "session_id": session_id,
         "goal": request.goal,
-        "status": state.get("status", "created") if state else "created",
-        "plan": state.get("plan", []) if state else []
+        "status": "pending",
+        "plan": []
     }
+
+
+# In-memory store for pending sessions awaiting streaming
+_pending_sessions: Dict[str, Dict[str, Any]] = {}
 
 
 @router.get("/sessions/{session_id}/plan")
@@ -93,8 +109,8 @@ async def stream_plan_generation(
     """
     Stream plan generation via Server-Sent Events.
     
-    Note: Plan is generated during session creation in LangGraph.
-    This endpoint streams the existing plan state.
+    If session is pending, starts graph execution and streams progress.
+    If session already has a plan, streams the existing plan.
     """
     request_id = str(uuid.uuid4())[:8]
     log = LogContext(logger, request_id=request_id, session_id=session_id, user_id=current_user.user_id)
@@ -102,12 +118,40 @@ async def stream_plan_generation(
     log.info(f"📥 Request: Stream plan (SSE)")
     
     orchestrator = await get_orchestrator()
+    
+    # Check if this is a pending session that needs execution
+    pending = _pending_sessions.pop(session_id, None)
+    
+    if pending:
+        # Start graph execution with streaming
+        log.info(f"🚀 Starting graph execution for pending session")
+        
+        async def stream_new_plan():
+            async for event in orchestrator.stream_graph(
+                session_id,
+                pending["initial_state"],
+                pending["config"]
+            ):
+                yield event
+        
+        log.info(f"📤 Response: Starting SSE stream for new plan generation")
+        return StreamingResponse(
+            event_generator(stream_new_plan()),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+    
+    # Session already exists - return existing state
     state = await orchestrator.get_session_state(session_id)
     
     if not state:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    async def generate():
+    async def generate_existing():
         # Send plan status
         yield {"type": "status", "status": state.get("status", "unknown")}
         
@@ -126,10 +170,10 @@ async def stream_plan_generation(
             "total_steps": len(state.get("plan", []))
         }
     
-    log.info(f"📤 Response: Starting SSE stream for plan")
+    log.info(f"📤 Response: Starting SSE stream for existing plan")
     
     return StreamingResponse(
-        event_generator(generate()),
+        event_generator(generate_existing()),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -168,7 +212,8 @@ async def stream_plan_execution(
     """
     Stream plan execution via Server-Sent Events.
     
-    Uses LangGraph orchestrator for execution with automatic checkpointing.
+    Resumes past the approval interrupt and executes the plan.
+    Uses LangGraph orchestrator with automatic checkpointing.
     """
     request_id = str(uuid.uuid4())[:8]
     log = LogContext(logger, request_id=request_id, session_id=session_id, user_id=current_user.user_id)
@@ -186,7 +231,8 @@ async def stream_plan_execution(
         raise HTTPException(status_code=403, detail="Access denied")
     
     async def generate():
-        async for event in orchestrator.stream_session(session_id):
+        # Pass approve=True to resume past the approval interrupt
+        async for event in orchestrator.stream_session(session_id, approve=True):
             log.debug(f"📡 SSE Event: {event.get('type')}", data=event)
             yield event
     
