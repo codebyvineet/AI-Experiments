@@ -16,6 +16,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.auth.authorization import get_current_user, get_current_user_with_token, create_mcp_token
 from app.models import TokenData
 from app.agent.graph import get_orchestrator
+from app.agent.react_agent import chat_stream
 from app.mcp.client import mcp_client
 from app.config.logging_config import get_logger, LogContext
 
@@ -25,6 +26,10 @@ router = APIRouter(prefix="/stream", tags=["streaming"])
 
 class CreateSessionRequest(BaseModel):
     goal: str
+
+
+class ChatRequest(BaseModel):
+    message: str
 
 
 class UpdatePlanRequest(BaseModel):
@@ -44,6 +49,55 @@ async def event_generator(
         yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
     except Exception as e:
         yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+
+
+@router.post("/chat")
+async def stream_chat(
+    request: ChatRequest,
+    auth_data: Tuple[TokenData, str] = Depends(get_current_user_with_token)
+):
+    """
+    ReAct Chat Mode — AI directly calls MCP tools and responds.
+
+    Uses LangGraph's prebuilt create_react_agent with ChatVertexAI + MCP tools.
+    No planning step, no approval — the AI autonomously reasons, calls tools,
+    and produces a final answer in a single streaming response.
+
+    Streams SSE events:
+      - thinking: AI is connecting / reasoning
+      - tool_call: AI decided to call an MCP tool
+      - tool_result: Tool execution result
+      - response: Final AI answer
+      - error: On failure
+    """
+    current_user, raw_token = auth_data
+    request_id = str(uuid.uuid4())[:8]
+    log = LogContext(logger, request_id=request_id, user_id=current_user.user_id)
+
+    log.info("📥 Request: Chat (ReAct mode)", data={"message": request.message[:100]})
+
+    # Generate MCP token for tool authorization
+    mcp_token = await create_mcp_token(current_user)
+
+    async def generate():
+        async for event in chat_stream(
+            message=request.message,
+            token=mcp_token,
+            user_id=current_user.user_id,
+        ):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    log.info("📤 Response: Starting SSE stream for chat")
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/sessions")

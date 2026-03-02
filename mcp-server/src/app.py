@@ -29,12 +29,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# Create FastMCP's HTTP app for streamable-http transport
+mcp_http = mcp.http_app()
+
+
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan handler."""
+async def lifespan(fastapi_app: FastAPI):
+    """Application lifespan handler — includes FastMCP session manager init."""
     logger.info("🚀 Starting MCP Server (FastMCP-based)")
     logger.info(f"📡 Backend URL: {BACKEND_URL}")
-    yield
+    # Initialize the StreamableHTTPSessionManager task group
+    session_mgr = mcp_http.routes[0].endpoint.session_manager
+    async with session_mgr.run():
+        yield
     logger.info("👋 Shutting down MCP Server")
 
 
@@ -324,15 +331,10 @@ async def direct_tool_call(
 # NATIVE MCP ENDPOINT (for langchain-mcp-adapters)
 # ============================================================================
 
-# Mount FastMCP's native ASGI app for streamable-http transport
-# This allows langchain-mcp-adapters to use the native MCP protocol
-try:
-    from starlette.routing import Mount
-    # Note: FastMCP's native transport requires the app to be run separately
-    # For now, we use the JSON-RPC wrapper above for compatibility
-    pass
-except ImportError:
-    pass
+# Mount FastMCP's native HTTP transport
+# http_app() provides route at /mcp for streamable-http protocol
+# langchain-mcp-adapters MultiServerMCPClient connects to this
+app.mount("/", mcp_http)
 
 
 # ============================================================================

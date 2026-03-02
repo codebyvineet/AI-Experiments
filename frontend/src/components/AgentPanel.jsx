@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '../api';
 
 export default function AgentPanel({ token, user }) {
+  const [mode, setMode] = useState('plan'); // 'plan' or 'chat'
   const [goal, setGoal] = useState('');
   const [sessionId, setSessionId] = useState(null);
   const [plan, setPlan] = useState([]);
@@ -12,12 +13,106 @@ export default function AgentPanel({ token, user }) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [previousSessions, setPreviousSessions] = useState([]);
   const [messageInput, setMessageInput] = useState('');
+  // Chat mode state
+  const [chatInput, setChatInput] = useState('');
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatStreaming, setChatStreaming] = useState(false);
+  const chatEndRef = useRef(null);
+  const chatAbortRef = useRef(null);
   const eventsEndRef = useRef(null);
   const abortControllerRef = useRef(null);
 
   useEffect(() => {
     eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [events]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages]);
+
+  // Chat mode: send message and stream ReAct agent response
+  const handleChatSend = async () => {
+    const msg = chatInput.trim();
+    if (!msg || chatStreaming) return;
+
+    setChatInput('');
+    setChatMessages(prev => [...prev, { role: 'user', content: msg }]);
+    setChatStreaming(true);
+    chatAbortRef.current = new AbortController();
+
+    // Placeholder for assistant response that we'll build up
+    const assistantIdx = { current: null };
+
+    try {
+      const response = await fetch('http://localhost:8000/stream/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ message: msg }),
+        signal: chatAbortRef.current.signal,
+      });
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+
+            if (data.type === 'thinking') {
+              setChatMessages(prev => [...prev, { role: 'system', content: `🤔 ${data.message}` }]);
+            } else if (data.type === 'tool_call') {
+              setChatMessages(prev => [...prev, {
+                role: 'tool',
+                content: `🔧 Calling **${data.tool}**(${JSON.stringify(data.args || {})})`,
+                tool: data.tool,
+                toolType: 'call',
+              }]);
+            } else if (data.type === 'tool_result') {
+              setChatMessages(prev => [...prev, {
+                role: 'tool',
+                content: data.result,
+                tool: data.tool,
+                toolType: 'result',
+              }]);
+            } else if (data.type === 'response') {
+              setChatMessages(prev => [...prev, { role: 'assistant', content: data.message }]);
+            } else if (data.type === 'error') {
+              setChatMessages(prev => [...prev, { role: 'error', content: `❌ ${data.error}` }]);
+            }
+          } catch (e) {
+            console.error('Chat SSE parse error:', e);
+          }
+        }
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        setChatMessages(prev => [...prev, { role: 'error', content: `❌ ${err.message}` }]);
+      }
+    } finally {
+      setChatStreaming(false);
+      chatAbortRef.current = null;
+    }
+  };
+
+  const handleChatStop = () => {
+    if (chatAbortRef.current) {
+      chatAbortRef.current.abort();
+    }
+    setChatStreaming(false);
+  };
 
   // Restore session WITHOUT clearing other sessions' state
   const restoreSession = async (sid) => {
@@ -401,6 +496,149 @@ export default function AgentPanel({ token, user }) {
   }, [token]);
 
   return (
+    <div>
+      {/* Mode Toggle */}
+      <div className="flex items-center gap-2 mb-4">
+        <button
+          onClick={() => setMode('plan')}
+          className={`px-4 py-2 rounded-lg font-medium text-sm transition-colors ${
+            mode === 'plan'
+              ? 'bg-blue-600 text-white'
+              : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+          }`}
+        >
+          📋 Plan Mode
+        </button>
+        <button
+          onClick={() => setMode('chat')}
+          className={`px-4 py-2 rounded-lg font-medium text-sm transition-colors ${
+            mode === 'chat'
+              ? 'bg-purple-600 text-white'
+              : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+          }`}
+        >
+          💬 Chat Mode
+        </button>
+        <span className="text-xs text-gray-500 ml-2">
+          {mode === 'plan'
+            ? 'Multi-step planning with approval'
+            : 'Direct AI tool calling (ReAct agent)'}
+        </span>
+      </div>
+
+      {/* Chat Mode UI */}
+      {mode === 'chat' && (
+        <div className="bg-gray-800 rounded-lg border border-gray-700 flex flex-col h-[700px]">
+          <div className="p-3 border-b border-gray-700 flex items-center justify-between">
+            <h3 className="font-medium">💬 Chat with AI Agent</h3>
+            <span className="text-xs text-gray-500">
+              ReAct agent — AI calls MCP tools autonomously
+            </span>
+          </div>
+
+          {/* Chat Messages */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {chatMessages.length === 0 ? (
+              <div className="text-gray-500 text-center py-12">
+                <p className="text-lg mb-2">Ask anything — the AI will use tools as needed</p>
+                <p className="text-sm">Examples: "List all items", "Create an employee named John", "How many items do we have?"</p>
+              </div>
+            ) : (
+              chatMessages.map((msg, i) => (
+                <div
+                  key={i}
+                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                >
+                  {msg.role === 'tool' && msg.toolType === 'result' ? (
+                    // Collapsible tool result
+                    <details className="max-w-[80%] bg-green-900/20 text-green-300 border border-green-700/50 rounded-lg text-xs">
+                      <summary className="px-3 py-2 cursor-pointer hover:bg-green-900/30">
+                        ✅ <strong>{msg.tool}</strong> returned data
+                      </summary>
+                      <pre className="px-3 py-2 border-t border-green-700/30 overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">
+                        {typeof msg.content === 'string' ? msg.content.slice(0, 2000) : JSON.stringify(msg.content, null, 2).slice(0, 2000)}
+                      </pre>
+                    </details>
+                  ) : (
+                    <div
+                      className={`max-w-[80%] rounded-lg px-4 py-2 text-sm ${
+                        msg.role === 'user'
+                          ? 'bg-blue-600 text-white'
+                          : msg.role === 'assistant'
+                          ? 'bg-gray-700 text-gray-200'
+                          : msg.role === 'tool'
+                          ? 'bg-yellow-900/30 text-yellow-300 border border-yellow-700/50'
+                          : msg.role === 'system'
+                          ? 'bg-gray-700/50 text-gray-400 italic text-xs'
+                          : 'bg-red-900/30 text-red-300'
+                      }`}
+                    >
+                      {msg.role === 'assistant' ? (
+                        <div
+                          className="prose prose-invert prose-sm max-w-none [&_ul]:list-disc [&_ul]:ml-4 [&_ol]:list-decimal [&_ol]:ml-4 [&_strong]:text-white"
+                          dangerouslySetInnerHTML={{
+                            __html: (typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content))
+                              .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                              .replace(/^\* /gm, '• ')
+                              .replace(/\n/g, '<br/>')
+                          }}
+                        />
+                      ) : (
+                        <pre className="whitespace-pre-wrap break-words">
+                          {typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2)}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+            {chatStreaming && (
+              <div className="flex justify-start">
+                <div className="bg-gray-700/50 rounded-lg px-4 py-2 text-sm text-gray-400 flex items-center gap-2">
+                  <span className="w-2 h-2 bg-purple-400 rounded-full animate-pulse"></span>
+                  AI is thinking...
+                </div>
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+
+          {/* Chat Input */}
+          <div className="p-3 border-t border-gray-700">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleChatSend()}
+                placeholder="Ask the AI agent anything..."
+                className="flex-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg focus:outline-none focus:border-purple-500"
+                disabled={chatStreaming}
+              />
+              {chatStreaming ? (
+                <button
+                  onClick={handleChatStop}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg font-medium transition-colors"
+                >
+                  ⏹ Stop
+                </button>
+              ) : (
+                <button
+                  onClick={handleChatSend}
+                  disabled={!chatInput.trim()}
+                  className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-medium transition-colors"
+                >
+                  Send
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Plan Mode UI (existing) */}
+      {mode === 'plan' && (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* Left Panel - Controls & Plan */}
       <div className="space-y-4">
@@ -782,6 +1020,8 @@ export default function AgentPanel({ token, user }) {
             )}
           </div>
         </div>
+      )}
+    </div>
       )}
     </div>
   );

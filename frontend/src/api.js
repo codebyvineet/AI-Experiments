@@ -218,5 +218,19 @@ export const api = {
   async getMcpCapabilities() {
     const res = await fetch(`${API_BASE}/mcp/capabilities`);
     return res.json();
+  },
+
+  // Chat Mode (ReAct agent — direct tool calling)
+  streamChat(token, message) {
+    // Returns an EventSource-like interface for SSE
+    // Caller handles the streaming via fetch + ReadableStream
+    return fetch(`${API_BASE}/stream/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ message })
+    });
   }
 };
