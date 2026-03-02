@@ -36,6 +36,11 @@ class MessageRequest(BaseModel):
     content: str
 
 
+class ReplanRequest(BaseModel):
+    """Re-plan request model."""
+    new_goal: str
+
+
 class ArchiveRequest(BaseModel):
     """Archive request model."""
     ttl_days: int = 30
@@ -192,6 +197,182 @@ async def stream_session_v2(
             "Connection": "keep-alive"
         }
     )
+
+
+@router.get("/v2/sessions")
+async def list_sessions_v2(
+    current_user: TokenData = Depends(require_permission("agent:execute"))
+):
+    """
+    List all sessions for the current user.
+    
+    Returns sessions with their status and whether they can be resumed.
+    Use this to show pending sessions after page refresh.
+    """
+    orchestrator = await get_orchestrator()
+    
+    sessions = await orchestrator.list_user_sessions(current_user.user_id)
+    
+    return {
+        "user_id": current_user.user_id,
+        "sessions": sessions,
+        "total": len(sessions)
+    }
+
+
+@router.get("/v2/sessions/{session_id}/resume")
+async def resume_session_v2(
+    session_id: str,
+    current_user: TokenData = Depends(require_permission("agent:execute"))
+):
+    """
+    Check if a session can be resumed and get resume info.
+    
+    Use this on page load to detect pending sessions:
+    - If action_needed is "approve", show the plan for approval
+    - If action_needed is "stream", reconnect to SSE stream
+    - If action_needed is "retry", show retry option for failed session
+    
+    This is the key endpoint for "resume on refresh" functionality.
+    """
+    orchestrator = await get_orchestrator()
+    
+    resume_info = await orchestrator.resume_session(session_id)
+    
+    if not resume_info.get("resumable"):
+        return resume_info
+    
+    # Verify ownership
+    state = await orchestrator.get_session_state(session_id)
+    if state and state.get("user_id") != current_user.user_id:
+        if "agent:admin" not in (current_user.permissions or []):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this session"
+            )
+    
+    return resume_info
+
+
+@router.post("/v2/sessions/{session_id}/replan")
+async def replan_session_v2(
+    session_id: str,
+    request: ReplanRequest,
+    current_user: TokenData = Depends(require_permission("agent:execute"))
+):
+    """
+    Interrupt execution and re-plan with new input.
+    
+    This allows users to:
+    - Change the goal mid-execution
+    - Add new requirements during planning
+    - Correct mistakes in the original request
+    
+    The session will pause at approval stage with the new plan.
+    """
+    orchestrator = await get_orchestrator()
+    
+    # Verify ownership
+    state = await orchestrator.get_session_state(session_id)
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found"
+        )
+    
+    if state.get("user_id") != current_user.user_id:
+        if "agent:admin" not in (current_user.permissions or []):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this session"
+            )
+    
+    # Generate new MCP token
+    mcp_token = await create_mcp_token(current_user)
+    
+    result = await orchestrator.interrupt_and_replan(
+        session_id,
+        request.new_goal,
+        mcp_token
+    )
+    
+    return result
+
+
+@router.post("/v2/sessions/{session_id}/stop")
+async def stop_session_v2(
+    session_id: str,
+    current_user: TokenData = Depends(require_permission("agent:execute"))
+):
+    """
+    Stop execution gracefully.
+    
+    Preserves:
+    - All completed results so far
+    - Current checkpoint for later resume
+    - Session context for re-planning
+    
+    After stopping, user can:
+    - Resume with /retry
+    - Re-plan with /replan
+    - View partial results
+    """
+    orchestrator = await get_orchestrator()
+    
+    # Verify ownership
+    state = await orchestrator.get_session_state(session_id)
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found"
+        )
+    
+    if state.get("user_id") != current_user.user_id:
+        if "agent:admin" not in (current_user.permissions or []):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this session"
+            )
+    
+    result = await orchestrator.stop_execution(session_id)
+    
+    return result
+
+
+@router.post("/v2/sessions/{session_id}/retry")
+async def retry_session_v2(
+    session_id: str,
+    current_user: TokenData = Depends(require_permission("agent:execute"))
+):
+    """
+    Retry a stopped or failed session.
+    
+    Resumes execution from the last checkpoint,
+    continuing from where it left off.
+    """
+    orchestrator = await get_orchestrator()
+    
+    # Verify ownership
+    state = await orchestrator.get_session_state(session_id)
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found"
+        )
+    
+    if state.get("user_id") != current_user.user_id:
+        if "agent:admin" not in (current_user.permissions or []):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this session"
+            )
+    
+    # Generate fresh MCP token
+    mcp_token = await create_mcp_token(current_user)
+    
+    result = await orchestrator.retry_session(session_id, mcp_token)
+    
+    return result
 
 
 # ============================================================================

@@ -280,9 +280,105 @@ graph = builder.compile(
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/agent/v2/sessions` | POST | Create session, generate plan |
+| `/agent/v2/sessions` | GET | List all user sessions |
 | `/agent/v2/sessions/{id}` | GET | Get session state |
 | `/agent/v2/sessions/{id}/approve` | POST | Approve/reject plan |
 | `/agent/v2/sessions/{id}/stream` | GET | SSE stream events |
+| `/agent/v2/sessions/{id}/resume` | GET | Check if session can be resumed |
+| `/agent/v2/sessions/{id}/replan` | POST | Interrupt and re-plan with new goal |
+| `/agent/v2/sessions/{id}/stop` | POST | Stop execution gracefully |
+| `/agent/v2/sessions/{id}/retry` | POST | Retry stopped/failed session |
+
+### Session Resume Features
+
+LangGraph's checkpointing enables powerful resume capabilities:
+
+#### 1. Resume on Page Refresh
+
+```bash
+# On page load, list user's sessions
+curl http://localhost:8000/agent/v2/sessions \
+  -H "Authorization: Bearer $TOKEN"
+
+# Response:
+# {
+#   "sessions": [
+#     {
+#       "session_id": "abc-123",
+#       "status": "awaiting_approval",
+#       "can_resume": true,
+#       "goal": "Create 4 items"
+#     }
+#   ]
+# }
+
+# Check resume status for a session
+curl http://localhost:8000/agent/v2/sessions/abc-123/resume \
+  -H "Authorization: Bearer $TOKEN"
+
+# Response:
+# {
+#   "resumable": true,
+#   "action_needed": "approve",  # or "stream", "retry"
+#   "message": "Plan is awaiting your approval",
+#   "plan": [...]
+# }
+```
+
+#### 2. Interrupt and Re-plan
+
+```bash
+# User wants to change goal mid-execution
+curl -X POST http://localhost:8000/agent/v2/sessions/abc-123/replan \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"new_goal": "Actually, create 5 items instead of 4"}'
+
+# Response:
+# {
+#   "session_id": "abc-123",
+#   "status": "awaiting_approval",
+#   "plan": [...],  # New plan
+#   "message": "Re-planned. Please approve the new plan."
+# }
+```
+
+#### 3. Stop and Retry
+
+```bash
+# Stop execution gracefully
+curl -X POST http://localhost:8000/agent/v2/sessions/abc-123/stop \
+  -H "Authorization: Bearer $TOKEN"
+
+# Response:
+# {
+#   "session_id": "abc-123",
+#   "status": "stopped",
+#   "current_step": 2,
+#   "total_steps": 4,
+#   "results": [...]  # Partial results
+# }
+
+# Later, retry from where it stopped
+curl -X POST http://localhost:8000/agent/v2/sessions/abc-123/retry \
+  -H "Authorization: Bearer $TOKEN"
+
+# Response:
+# {
+#   "session_id": "abc-123",
+#   "status": "executing",
+#   "current_step": 2,
+#   "message": "Session ready for retry. Connect to stream to continue."
+# }
+```
+
+### LangGraph Methods Used
+
+| Method | Purpose |
+|--------|---------|
+| `aget_state()` | Get checkpoint state, check pending interrupts |
+| `aupdate_state(as_node=)` | Modify state and redirect graph flow |
+| `ainvoke(Command(resume=))` | Resume from interrupt with user input |
 
 ### Example Flow
 

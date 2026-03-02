@@ -11,7 +11,7 @@ Checkpointing uses AsyncMongoDBSaver for persistence.
 
 import uuid
 import asyncio
-from typing import Dict, Any, AsyncGenerator, Optional
+from typing import Dict, Any, AsyncGenerator, Optional, List
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.mongodb.aio import AsyncMongoDBSaver
@@ -183,11 +183,124 @@ class LangGraphOrchestrator:
         try:
             state = await self._graph.aget_state(config)
             if state and state.values:
-                return dict(state.values)
+                result = dict(state.values)
+                # Add metadata about pending interrupts for resume functionality
+                result["_has_pending_interrupt"] = bool(state.tasks)
+                result["_next_nodes"] = list(state.next) if state.next else []
+                return result
         except Exception as e:
             logger.error(f"Failed to get session state: {e}")
         
         return None
+    
+    async def list_user_sessions(self, user_id: str) -> List[Dict[str, Any]]:
+        """
+        List all sessions for a user with their status.
+        
+        Uses LangGraph checkpointer to find all threads for the user.
+        Returns resumable sessions (those with pending interrupts).
+        """
+        log = LogContext(logger, user_id=user_id)
+        log.info(f"📋 Listing sessions for user: {user_id}")
+        
+        sessions = []
+        
+        try:
+            # Query MongoDB directly for user sessions
+            # LangGraph stores checkpoints with thread_id as key
+            db = self._mongo_client[self.settings.MONGODB_DB_NAME]
+            
+            # Find all checkpoints that belong to this user
+            async for doc in db.checkpoints.find(
+                {"channel_values.user_id": user_id}
+            ).sort("checkpoint_ts", -1).limit(50):
+                
+                thread_id = doc.get("thread_id")
+                channel_values = doc.get("channel_values", {})
+                
+                sessions.append({
+                    "session_id": thread_id,
+                    "status": channel_values.get("status", "unknown"),
+                    "goal": channel_values.get("goal", ""),
+                    "created_at": doc.get("checkpoint_ts"),
+                    "has_pending_interrupt": bool(doc.get("pending_sends")),
+                    "plan_steps": len(channel_values.get("plan", [])),
+                    "current_step": channel_values.get("current_step", 0),
+                    "can_resume": channel_values.get("status") in ["awaiting_approval", "executing"]
+                })
+            
+            log.info(f"✅ Found {len(sessions)} sessions for user")
+            
+        except Exception as e:
+            log.error(f"❌ Failed to list sessions: {e}")
+        
+        return sessions
+    
+    async def resume_session(self, session_id: str) -> Dict[str, Any]:
+        """
+        Resume a session from its checkpoint.
+        
+        This is a key LangGraph feature - sessions can be resumed from any
+        checkpoint after page refresh, server restart, etc.
+        
+        Returns the current state and what action is needed (approve, continue, etc).
+        """
+        log = LogContext(logger, session_id=session_id)
+        log.info(f"🔄 Attempting to resume session: {session_id}")
+        
+        config = {"configurable": {"thread_id": session_id}}
+        
+        try:
+            state = await self._graph.aget_state(config)
+            
+            if not state or not state.values:
+                return {
+                    "resumable": False,
+                    "reason": "Session not found or has no checkpoint"
+                }
+            
+            values = dict(state.values)
+            
+            # Determine resume action based on state
+            resume_info = {
+                "resumable": True,
+                "session_id": session_id,
+                "status": values.get("status"),
+                "goal": values.get("goal"),
+                "plan": values.get("plan", []),
+                "current_step": values.get("current_step", 0),
+                "results": values.get("results", []),
+                "next_nodes": list(state.next) if state.next else [],
+                "has_pending_interrupt": bool(state.tasks)
+            }
+            
+            # Determine what action user needs to take
+            if values.get("status") == "awaiting_approval":
+                resume_info["action_needed"] = "approve"
+                resume_info["message"] = "Plan is awaiting your approval"
+            elif values.get("status") == "executing":
+                resume_info["action_needed"] = "stream"
+                resume_info["message"] = "Execution in progress - reconnect to stream"
+            elif values.get("status") == "completed":
+                resume_info["action_needed"] = "none"
+                resume_info["message"] = "Session already completed"
+                resume_info["resumable"] = False
+            elif values.get("status") == "failed":
+                resume_info["action_needed"] = "retry"
+                resume_info["message"] = f"Session failed: {values.get('error')}"
+            else:
+                resume_info["action_needed"] = "unknown"
+                resume_info["message"] = "Session in unknown state"
+            
+            log.info(f"✅ Session resumable: {resume_info['action_needed']}")
+            return resume_info
+            
+        except Exception as e:
+            log.error(f"❌ Failed to resume session: {e}")
+            return {
+                "resumable": False,
+                "reason": str(e)
+            }
     
     async def approve_plan(self, session_id: str, approved: bool) -> Dict[str, Any]:
         """
@@ -345,6 +458,194 @@ class LangGraphOrchestrator:
             
             async for event in self.stream_session(session_id):
                 yield event
+    
+    async def interrupt_and_replan(
+        self,
+        session_id: str,
+        user_input: str,
+        token: str
+    ) -> Dict[str, Any]:
+        """
+        Interrupt current execution and trigger re-planning with new input.
+        
+        This is a key feature that showcases LangGraph's power:
+        - Uses update_state to inject user input
+        - Redirects graph flow back to planner node
+        - Preserves existing context and results
+        
+        Args:
+            session_id: Session to interrupt
+            user_input: New user input/instruction
+            token: JWT token for re-authorization
+            
+        Returns:
+            New plan after re-planning
+        """
+        log = LogContext(logger, session_id=session_id)
+        log.info(f"🔄 Interrupting session for re-planning: {user_input[:50]}...")
+        
+        config = {"configurable": {"thread_id": session_id}}
+        
+        try:
+            # Get current state
+            current_state = await self._graph.aget_state(config)
+            if not current_state or not current_state.values:
+                return {"error": "Session not found"}
+            
+            values = dict(current_state.values)
+            
+            # Update state with new user input and reset for re-planning
+            from datetime import datetime
+            
+            await self._graph.aupdate_state(
+                config,
+                {
+                    "goal": user_input,  # New goal from user
+                    "status": "replanning",
+                    "approved": False,  # Require re-approval
+                    "current_step": 0,  # Reset step counter
+                    "token": token,  # Fresh token
+                    "messages": values.get("messages", []) + [{
+                        "role": "user",
+                        "content": f"User requested re-plan: {user_input}",
+                        "timestamp": datetime.utcnow().isoformat()
+                    }]
+                },
+                as_node="planner"  # Go back to planner
+            )
+            
+            # Resume graph from planner (will pause again at approval)
+            try:
+                await self._graph.ainvoke(None, config)
+            except Exception:
+                pass  # Expected pause at interrupt
+            
+            # Get new state with plan
+            new_state = await self.get_session_state(session_id)
+            
+            log.info(f"✅ Re-planning complete, new plan has {len(new_state.get('plan', []))} steps")
+            
+            return {
+                "session_id": session_id,
+                "status": "awaiting_approval",
+                "plan": new_state.get("plan", []),
+                "message": "Re-planned. Please approve the new plan."
+            }
+            
+        except Exception as e:
+            log.error(f"❌ Re-planning failed: {e}")
+            return {"error": str(e)}
+    
+    async def stop_execution(self, session_id: str) -> Dict[str, Any]:
+        """
+        Stop execution gracefully.
+        
+        This marks the session as stopped and allows:
+        - Resuming later from checkpoint
+        - Re-planning with new input
+        - Viewing partial results
+        
+        Note: LangGraph handles this gracefully through state updates.
+        """
+        log = LogContext(logger, session_id=session_id)
+        log.info(f"⏹️ Stopping session: {session_id}")
+        
+        config = {"configurable": {"thread_id": session_id}}
+        
+        try:
+            # Get current state
+            current_state = await self._graph.aget_state(config)
+            if not current_state or not current_state.values:
+                return {"error": "Session not found"}
+            
+            values = dict(current_state.values)
+            
+            # Update state to stopped
+            from datetime import datetime
+            
+            await self._graph.aupdate_state(
+                config,
+                {
+                    "status": "stopped",
+                    "messages": values.get("messages", []) + [{
+                        "role": "system",
+                        "content": "Execution stopped by user",
+                        "timestamp": datetime.utcnow().isoformat()
+                    }]
+                }
+            )
+            
+            log.info(f"✅ Session stopped")
+            
+            return {
+                "session_id": session_id,
+                "status": "stopped",
+                "results": values.get("results", []),
+                "current_step": values.get("current_step", 0),
+                "total_steps": len(values.get("plan", [])),
+                "message": "Execution stopped. You can resume or re-plan."
+            }
+            
+        except Exception as e:
+            log.error(f"❌ Failed to stop session: {e}")
+            return {"error": str(e)}
+    
+    async def retry_session(self, session_id: str, token: str) -> Dict[str, Any]:
+        """
+        Retry a failed or stopped session.
+        
+        This resumes execution from the last checkpoint,
+        skipping already completed steps.
+        """
+        log = LogContext(logger, session_id=session_id)
+        log.info(f"🔄 Retrying session: {session_id}")
+        
+        config = {"configurable": {"thread_id": session_id}}
+        
+        try:
+            # Get current state
+            current_state = await self._graph.aget_state(config)
+            if not current_state or not current_state.values:
+                return {"error": "Session not found"}
+            
+            values = dict(current_state.values)
+            
+            # Can only retry stopped or failed sessions
+            if values.get("status") not in ["stopped", "failed"]:
+                return {
+                    "error": f"Cannot retry session with status: {values.get('status')}"
+                }
+            
+            # Update state to resume execution
+            from datetime import datetime
+            
+            await self._graph.aupdate_state(
+                config,
+                {
+                    "status": "executing",
+                    "approved": True,  # Already approved
+                    "token": token,  # Fresh token
+                    "messages": values.get("messages", []) + [{
+                        "role": "system",
+                        "content": "Execution resumed",
+                        "timestamp": datetime.utcnow().isoformat()
+                    }]
+                },
+                as_node="executor_dispatch"  # Resume from executor
+            )
+            
+            log.info(f"✅ Session ready for retry from step {values.get('current_step', 0)}")
+            
+            return {
+                "session_id": session_id,
+                "status": "executing",
+                "current_step": values.get("current_step", 0),
+                "message": "Session ready for retry. Connect to stream to continue."
+            }
+            
+        except Exception as e:
+            log.error(f"❌ Failed to retry session: {e}")
+            return {"error": str(e)}
 
 
 # Global instance
