@@ -224,16 +224,23 @@ This creates 3 users:
 
 1. **Login as `viewer_demo`** (read-only):
    - **Items CRUD**: "New Item", "Edit", "Delete" buttons are hidden
-   - **AI Agent**: Shows "🔒 Agent Access Denied" banner, input disabled
+   - **AI Agent**: Can create plans ✅, but write operations fail during execution
    - **API calls**: `POST /items/` returns `403 Permission denied: requires 'items:write'`
+   - **Example**: Viewer can run "List all items" but not "Create a new item"
 
 2. **Login as `user_demo`** (normal user):
    - **Items CRUD**: Can create, edit, delete items ✅
-   - **AI Agent**: Can execute plans ✅
+   - **AI Agent**: Can execute all plans ✅
    - **Admin features**: Not available (no `users:*` permissions)
 
 3. **Login as `admin_demo`** (full access):
    - All features available ✅
+
+**Authorization Flow:**
+- All users can access the AI Agent and create plans
+- Authorization happens at the **MCP tool execution level**
+- When a read_only user's plan tries to execute `create_item`, the MCP server returns 403
+- Read operations (`list_items`, `search_items`) succeed for all users
 
 The UI shows a permissions banner indicating your current access level:
 ```
