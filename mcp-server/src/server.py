@@ -64,7 +64,8 @@ async def backend_request(
         if response.status_code == 401:
             raise PermissionError("Unauthorized - invalid or expired token")
         if response.status_code == 403:
-            raise PermissionError("Forbidden - insufficient permissions")
+            detail = response.json().get("detail", "Insufficient permissions")
+            raise PermissionError(f"Permission denied: {detail}")
         if response.status_code == 404:
             return {"error": "Not found", "status_code": 404}
         

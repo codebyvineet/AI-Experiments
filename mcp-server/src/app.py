@@ -273,12 +273,24 @@ async def handle_message(
             status_code=400
         )
     except Exception as e:
+        error_msg = str(e)
+        # ToolError wrapping PermissionError → return 403, not 500
+        if "Permission denied" in error_msg or "Forbidden" in error_msg or "Unauthorized" in error_msg:
+            logger.warning(f"[MCP] Permission error: {error_msg}")
+            return JSONResponse(
+                content={
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32001, "message": error_msg}
+                },
+                status_code=403
+            )
         logger.error(f"[MCP] Internal error: {e}", exc_info=True)
         return JSONResponse(
             content={
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "error": {"code": -32603, "message": str(e)}
+                "error": {"code": -32603, "message": error_msg}
             },
             status_code=500
         )
