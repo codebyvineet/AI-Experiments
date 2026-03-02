@@ -6,6 +6,8 @@ export default function AgentPanel({ token, user }) {
   const [sessionId, setSessionId] = useState(null);
   const [plan, setPlan] = useState([]);
   const [events, setEvents] = useState([]);
+  const [results, setResults] = useState([]); // Store execution results
+  const [finalSummary, setFinalSummary] = useState(null); // Final summary
   const [status, setStatus] = useState('idle'); // idle, planning, planned, executing, completed
   const [isStreaming, setIsStreaming] = useState(false);
   const eventsEndRef = useRef(null);
@@ -53,8 +55,24 @@ export default function AgentPanel({ token, user }) {
                 setPlan(prev => prev.map((s, i) => 
                   i === data.step_index ? { ...s, status: 'completed' } : s
                 ));
+              } else if (data.type === 'task_complete' && data.result) {
+                // Capture task results
+                const taskName = data.task?.name || data.task_name || data.message || 'Task';
+                setResults(prev => [...prev, {
+                  task: taskName,
+                  result: data.result,
+                  timestamp: new Date().toISOString()
+                }]);
               } else if (data.type === 'execution_complete') {
                 setStatus('completed');
+                // Capture final summary if provided
+                if (data.summary) {
+                  // Format summary for display
+                  const summaryText = typeof data.summary === 'string' 
+                    ? data.summary 
+                    : data.summary.summary || data.summary.message || JSON.stringify(data.summary, null, 2);
+                  setFinalSummary(summaryText);
+                }
               }
             } catch (e) {
               console.error('Parse error:', e);
@@ -74,6 +92,8 @@ export default function AgentPanel({ token, user }) {
     
     setEvents([]);
     setPlan([]);
+    setResults([]);
+    setFinalSummary(null);
     setStatus('planning');
     addEvent({ type: 'user_action', action: 'Creating session', goal });
 
@@ -294,6 +314,62 @@ export default function AgentPanel({ token, user }) {
           <div ref={eventsEndRef} />
         </div>
       </div>
+
+      {/* Results Panel - Full Width Below */}
+      {(results.length > 0 || finalSummary || status === 'completed') && (
+        <div className="lg:col-span-2 bg-gray-800 rounded-lg border border-gray-700">
+          <div className="p-3 border-b border-gray-700 flex items-center justify-between">
+            <h3 className="font-medium">📊 Results & Output</h3>
+            {status === 'completed' && (
+              <span className="text-sm text-green-400 flex items-center gap-2">
+                <span className="w-2 h-2 bg-green-400 rounded-full"></span>
+                Execution Complete
+              </span>
+            )}
+          </div>
+          
+          <div className="p-4 space-y-4">
+            {/* Final Summary */}
+            {finalSummary && (
+              <div className="bg-green-900/20 border border-green-700 rounded-lg p-4">
+                <h4 className="font-medium text-green-400 mb-2">✅ Summary</h4>
+                <p className="text-gray-200 whitespace-pre-wrap">{finalSummary}</p>
+              </div>
+            )}
+            
+            {/* Task Results */}
+            {results.length > 0 && (
+              <div className="space-y-3">
+                <h4 className="font-medium text-gray-400">Task Results:</h4>
+                {results.map((result, i) => (
+                  <div key={i} className="bg-gray-700/50 rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="font-medium text-blue-400">{result.task}</span>
+                      <span className="text-xs text-gray-500">
+                        {new Date(result.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    <div className="bg-gray-900/50 rounded p-3 overflow-x-auto">
+                      <pre className="text-sm text-gray-300 whitespace-pre-wrap">
+                        {typeof result.result === 'string' 
+                          ? result.result 
+                          : JSON.stringify(result.result, null, 2)}
+                      </pre>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            
+            {/* No results yet but completed */}
+            {status === 'completed' && results.length === 0 && !finalSummary && (
+              <div className="text-gray-400 text-center py-4">
+                <p>Execution completed. Check the event stream for details.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
