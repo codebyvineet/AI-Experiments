@@ -823,6 +823,38 @@ async for event in graph.astream(input, config, stream_mode="messages"):
 
 ---
 
+## Implementation Status ✅ COMPLETED
+
+The LangGraph migration has been implemented. See `docs/LANGGRAPH_IMPLEMENTATION.md` for the complete guide.
+
+### New Files Created
+
+| File | Purpose |
+|------|---------|
+| `app/agent/state.py` | AgentState TypedDict with reducers |
+| `app/agent/nodes.py` | Graph nodes (planner, approval, executor, summary) |
+| `app/agent/graph.py` | StateGraph with checkpointing |
+| `app/agent/tools.py` | MCP tool wrapper |
+| `docs/LANGGRAPH_IMPLEMENTATION.md` | Implementation guide |
+
+### New API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/agent/v2/sessions` | POST | Create session, generate plan |
+| `/agent/v2/sessions/{id}` | GET | Get session state |
+| `/agent/v2/sessions/{id}/approve` | POST | Approve/reject plan |
+| `/agent/v2/sessions/{id}/stream` | GET | SSE stream events |
+
+### Dependencies Added
+
+```
+langgraph-checkpoint-mongodb>=2.0.0
+langchain-mcp-adapters>=0.1.0
+```
+
+---
+
 ## References
 
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
