@@ -342,11 +342,7 @@ Respond ONLY with valid JSON, no markdown or explanation.
         # If a specific MCP tool is specified AND we have a token, execute via MCP client
         if task_tool and token and task_tool in available_mcp_tools:
             # Log MCP tool call with grepable prefix
-            print(f"\n[MCP_CALL] ========== MCP TOOL CALL ==========")
-            print(f"[MCP_CALL] Tool: {task_tool}")
-            print(f"[MCP_CALL] Params: {json.dumps(task_tool_params, indent=2)}")
-            print(f"[MCP_CALL] Session: {session_id}")
-            print(f"[MCP_CALL] ======================================\n")
+            logger.info(f"[AIFLOW] MCP Tool Called: {task_tool} with params: {json.dumps(task_tool_params)}")
             
             log.info(f"🔧 Executing MCP tool via MCP Server: {task_tool}", data={"params": task_tool_params})
             
@@ -356,11 +352,7 @@ Respond ONLY with valid JSON, no markdown or explanation.
                 duration_ms = int((time.time() - start_time) * 1000)
                 
                 # Log MCP result with grepable prefix
-                print(f"\n[MCP_RESULT] ========== MCP TOOL RESULT ==========")
-                print(f"[MCP_RESULT] Tool: {task_tool}")
-                print(f"[MCP_RESULT] Duration: {duration_ms}ms")
-                print(f"[MCP_RESULT] Result: {json.dumps(mcp_result, indent=2, default=str)[:2000]}")
-                print(f"[MCP_RESULT] =========================================\n")
+                logger.info(f"[AIFLOW] MCP Tool Result: {task_tool} -> {json.dumps(mcp_result, default=str)[:2000]}")
                 
                 # Check if result indicates error (dict with error key)
                 if isinstance(mcp_result, dict) and mcp_result.get("error"):
