@@ -188,119 +188,18 @@ class MultiAgentOrchestrator:
             })
             
         except Exception as e:
-            log.error(f"❌ Plan generation failed: {e}")
-            # Fall back to rule-based plan if AI fails
-            log.info("⚠️ Falling back to rule-based planning...")
-            plan_steps = await self._create_plan_for_goal(session.goal)
-            
-            for i, step in enumerate(plan_steps):
-                yield {
-                    "type": "plan_step",
-                    "step_number": i + 1,
-                    "total_steps": len(plan_steps),
-                    "step": step
-                }
-                session.plan.append(step)
-            
-            session.status = "planned"
+            log.error(f"❌ Plan generation failed: {e}", data={"error": str(e)})
+            session.status = "failed"
             session.updated_at = datetime.now(timezone.utc)
             await self._save_session_state(session)
             
             yield {
-                "type": "plan_complete",
-                "plan": session.plan,
-                "total_steps": len(session.plan),
-                "message": "Plan generated (fallback mode). You can modify it or proceed with execution."
+                "type": "error",
+                "error": str(e),
+                "message": f"Plan generation failed: {e}"
             }
-    
-    async def _create_plan_for_goal(self, goal: str) -> List[Dict[str, Any]]:
-        """Create a detailed plan based on the goal."""
-        goal_lower = goal.lower()
-        steps = []
+            return
         
-        # Phase 1: Research (can be parallel)
-        if any(word in goal_lower for word in ["find", "search", "research", "look"]):
-            steps.append({
-                "step_id": str(uuid.uuid4()),
-                "phase": "research",
-                "description": "Search for relevant information",
-                "agent_type": "research",
-                "execution_mode": "parallel",
-                "sub_tasks": [
-                    {"name": "Search databases", "status": "pending"},
-                    {"name": "Query external APIs", "status": "pending"},
-                    {"name": "Analyze existing data", "status": "pending"}
-                ],
-                "status": "pending",
-                "editable": True
-            })
-        
-        # Phase 2: Analysis
-        steps.append({
-            "step_id": str(uuid.uuid4()),
-            "phase": "analysis",
-            "description": "Analyze gathered information",
-            "agent_type": "research",
-            "execution_mode": "sequential",
-            "sub_tasks": [
-                {"name": "Process raw data", "status": "pending"},
-                {"name": "Extract insights", "status": "pending"}
-            ],
-            "status": "pending",
-            "editable": True
-        })
-        
-        # Phase 3: Execution
-        if any(word in goal_lower for word in ["create", "make", "build", "generate"]):
-            steps.append({
-                "step_id": str(uuid.uuid4()),
-                "phase": "execution",
-                "description": "Execute the main task",
-                "agent_type": "execution",
-                "execution_mode": "sequential",
-                "sub_tasks": [
-                    {"name": "Prepare resources", "status": "pending"},
-                    {"name": "Execute main action", "status": "pending"},
-                    {"name": "Post-process results", "status": "pending"}
-                ],
-                "status": "pending",
-                "editable": True
-            })
-        
-        # Phase 4: Data operations (if needed)
-        if any(word in goal_lower for word in ["store", "save", "update", "delete", "user", "item"]):
-            steps.append({
-                "step_id": str(uuid.uuid4()),
-                "phase": "data_operations",
-                "description": "Perform database operations via MCP",
-                "agent_type": "execution",
-                "execution_mode": "sequential",
-                "sub_tasks": [
-                    {"name": "Validate data", "status": "pending"},
-                    {"name": "Execute MCP operations", "status": "pending"},
-                    {"name": "Verify results", "status": "pending"}
-                ],
-                "status": "pending",
-                "editable": True
-            })
-        
-        # Phase 5: Validation
-        steps.append({
-            "step_id": str(uuid.uuid4()),
-            "phase": "validation",
-            "description": "Validate results and generate summary",
-            "agent_type": "validation",
-            "execution_mode": "sequential",
-            "sub_tasks": [
-                {"name": "Verify outputs", "status": "pending"},
-                {"name": "Generate summary", "status": "pending"}
-            ],
-            "status": "pending",
-            "editable": True
-        })
-        
-        return steps
-    
     async def update_plan(
         self, 
         session_id: str, 
