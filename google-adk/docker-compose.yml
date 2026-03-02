@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGODB_URL=mongodb://mongodb:27017
+      - MONGODB_DATABASE=adk_demo
+      - REDIS_URL=redis://redis:6379
+      - REDIS_DB=0
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - JWT_ALGORITHM=HS256
+      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+      # Google AI — set one of the following:
+      # Option A: Google AI Studio key
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      # Option B: Vertex AI service account
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-}
+      - GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION:-us-central1}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/service-account.json
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8000
+      - DEBUG=true
+      # ADK agent connects to MCP server via SSE
+      - MCP_SERVER_URL=http://mcp-server:8001
+    volumes:
+      - ./credentials:/app/credentials:ro
+    depends_on:
+      - mongodb
+      - redis
+      - mcp-server
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  mcp-server:
+    build:
+      context: mcp-server
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - MONGODB_URL=mongodb://mongodb:27017
+      - MONGODB_DATABASE=adk_demo
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+      - JWT_ALGORITHM=HS256
+      - MCP_SERVER_HOST=0.0.0.0
+      - MCP_SERVER_PORT=8001
+    depends_on:
+      - mongodb
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
+  redis_data:
