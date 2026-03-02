@@ -94,10 +94,10 @@ class LangGraphOrchestrator:
             log.info("🔧 Setting up dual checkpointer (Redis + MongoDB)")
             
             # MongoDB (cold storage - permanent)
-            self._mongo_client = MongoClient(self.settings.MONGODB_URL)
+            self._mongo_client = MongoClient(self.settings.mongodb_url)
             mongo_saver = MongoDBSaver(
                 self._mongo_client,
-                db_name=self.settings.MONGODB_DB_NAME
+                db_name=self.settings.mongodb_database
             )
             
             # Redis (hot storage - 30 min TTL)
@@ -123,10 +123,10 @@ class LangGraphOrchestrator:
         """Setup MongoDB-only checkpointer (fallback)."""
         log.info("🔧 Setting up MongoDB checkpointer")
         
-        self._mongo_client = MongoClient(self.settings.MONGODB_URL)
+        self._mongo_client = MongoClient(self.settings.mongodb_url)
         self._checkpointer = MongoDBSaver(
             self._mongo_client,
-            db_name=self.settings.MONGODB_DB_NAME
+            db_name=self.settings.mongodb_database
         )
         
         log.info("✅ MongoDB checkpointer ready")
@@ -259,7 +259,7 @@ class LangGraphOrchestrator:
         try:
             # Query MongoDB directly for user sessions
             # LangGraph stores checkpoints with thread_id as key
-            db = self._mongo_client[self.settings.MONGODB_DB_NAME]
+            db = self._mongo_client[self.settings.mongodb_database]
             
             # Find all checkpoints that belong to this user
             async for doc in db.checkpoints.find(

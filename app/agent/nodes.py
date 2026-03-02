@@ -37,7 +37,7 @@ async def planner_node(state: AgentState) -> Dict[str, Any]:
     
     Note: Does NOT check user permissions - that happens at execution time.
     """
-    log = LogContext(logger, session_id=state["session_id"], agent="planner")
+    log = LogContext(logger, session_id=state["session_id"], agent_type="planner")
     log.info(f"🎯 Starting plan generation for goal: {state['goal']}")
     
     start_time = time.time()
@@ -101,7 +101,7 @@ def approval_node(state: AgentState) -> Dict[str, Any]:
     This node uses LangGraph's interrupt() to pause execution
     and wait for human approval of the plan.
     """
-    log = LogContext(logger, session_id=state["session_id"], agent="approval")
+    log = LogContext(logger, session_id=state["session_id"], agent_type="approval")
     log.info(f"⏸️ Awaiting human approval for plan with {len(state.get('plan', []))} steps")
     
     # Use LangGraph interrupt to pause and wait for approval
@@ -138,7 +138,7 @@ async def executor_dispatch(state: AgentState) -> Dict[str, Any]:
     For parallel execution, this node prepares tasks and the graph
     handles them via Send() in conditional edges.
     """
-    log = LogContext(logger, session_id=state["session_id"], agent="executor")
+    log = LogContext(logger, session_id=state["session_id"], agent_type="executor")
     
     # Check if approved
     if not state.get("approved", False):
@@ -218,7 +218,7 @@ async def task_executor_node(task_state: Dict[str, Any]) -> Dict[str, Any]:
     task = task_state["task"]
     task_index = task_state["task_index"]
     
-    log = LogContext(logger, session_id=session_id, agent="task_executor")
+    log = LogContext(logger, session_id=session_id, agent_type="task_executor")
     
     task_name = task.get("name", f"Task {task_index}")
     tool_name = task.get("tool")
@@ -321,7 +321,7 @@ def step_aggregator_node(state: AgentState) -> Dict[str, Any]:
     2. Updates current_step to advance to next step
     3. Marks step as completed
     """
-    log = LogContext(logger, session_id=state["session_id"], agent="aggregator")
+    log = LogContext(logger, session_id=state["session_id"], agent_type="aggregator")
     
     results = state.get("results", [])
     current_step = state.get("current_step", 0)
@@ -372,7 +372,7 @@ async def summary_node(state: AgentState) -> Dict[str, Any]:
     
     Called after all steps are completed (or on failure).
     """
-    log = LogContext(logger, session_id=state["session_id"], agent="summary")
+    log = LogContext(logger, session_id=state["session_id"], agent_type="summary")
     log.info(f"📊 Generating execution summary")
     
     results = state.get("results", [])
