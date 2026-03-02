@@ -212,21 +212,29 @@ export default function AgentPanel({ token, user }) {
     refreshSessions();
   };
 
+  // Auto-save plan on change with debounce
+  const saveTimeoutRef = useRef(null);
+  
   const handleUpdateStep = (stepIndex, field, value) => {
-    setPlan(prev => prev.map((step, i) => 
+    const newPlan = plan.map((step, i) => 
       i === stepIndex ? { ...step, [field]: value } : step
-    ));
-  };
-
-  const handleSavePlan = async () => {
-    if (!sessionId) return;
+    );
+    setPlan(newPlan);
     
-    try {
-      await api.updatePlan(token, sessionId, plan);
-      addEvent({ type: 'plan_updated', message: 'Plan saved successfully' });
-    } catch (err) {
-      addEvent({ type: 'error', error: err.message });
+    // Auto-save with debounce (500ms after last change)
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
     }
+    saveTimeoutRef.current = setTimeout(async () => {
+      if (sessionId) {
+        try {
+          await api.updatePlan(token, sessionId, newPlan);
+          // Silent save - no event needed
+        } catch (err) {
+          console.error('Auto-save failed:', err);
+        }
+      }
+    }, 500);
   };
 
   // Start new session (clear current)
@@ -442,22 +450,13 @@ export default function AgentPanel({ token, user }) {
               🚀 Create Plan
             </button>
             {status === 'planned' && (
-              <>
-                <button
-                  onClick={handleSavePlan}
-                  disabled={isStreaming}
-                  className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 rounded font-medium transition-colors"
-                >
-                  💾 Save
-                </button>
-                <button
-                  onClick={handleExecutePlan}
-                  disabled={isStreaming}
-                  className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 rounded font-medium transition-colors"
-                >
-                  ▶️ Execute Plan
-                </button>
-              </>
+              <button
+                onClick={handleExecutePlan}
+                disabled={isStreaming}
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 rounded font-medium transition-colors"
+              >
+                ▶️ Execute Plan
+              </button>
             )}
             {status === 'stopped' && (
               <button
