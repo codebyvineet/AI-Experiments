@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '../api';
 
 export default function AgentPanel({ token, user }) {
@@ -6,56 +6,66 @@ export default function AgentPanel({ token, user }) {
   const [sessionId, setSessionId] = useState(null);
   const [plan, setPlan] = useState([]);
   const [events, setEvents] = useState([]);
-  const [results, setResults] = useState([]); // Store execution results
-  const [finalSummary, setFinalSummary] = useState(null); // Final summary
-  const [status, setStatus] = useState('idle'); // idle, planning, planned, executing, completed
+  const [results, setResults] = useState([]);
+  const [finalSummary, setFinalSummary] = useState(null);
+  const [status, setStatus] = useState('idle'); // idle, planning, planned, executing, completed, stopped
   const [isStreaming, setIsStreaming] = useState(false);
   const [previousSessions, setPreviousSessions] = useState([]);
   const eventsEndRef = useRef(null);
-
-  // Note: Agent is accessible to all users. Authorization happens at tool execution level.
-  // A read_only user can create plans, but write operations will fail with 403 during execution.
+  const abortControllerRef = useRef(null);
 
   useEffect(() => {
     eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [events]);
 
+  // Restore session WITHOUT clearing other sessions' state
   const restoreSession = async (sid) => {
+    // Don't restore if already on this session
+    if (sid === sessionId) return;
+    
     try {
       const session = await api.getSession(token, sid);
-      if (session && session.session_id) {
-        setSessionId(session.session_id);
+      if (session) {
+        setSessionId(session.session_id || sid);
         setGoal(session.goal || '');
-        if (session.plan && Array.isArray(session.plan)) {
-          setPlan(session.plan);
-        }
+        setPlan(session.plan || []);
+        setResults(session.results || []);
+        
         // Map backend status to frontend status
         const statusMap = {
           'awaiting_approval': 'planned',
           'executing': 'executing',
           'completed': 'completed',
-          'planning': 'planning'
+          'planning': 'planning',
+          'stopped': 'stopped'
         };
         setStatus(statusMap[session.status] || 'idle');
-        addEvent({ type: 'session_restored', session_id: sid, message: `Restored session: ${session.status}` });
+        
+        // Don't clear events - just add restoration event
+        addEvent({ type: 'session_restored', session_id: sid, message: `Loaded session: ${session.status}` });
       }
     } catch (err) {
       console.error('Failed to restore session:', err);
+      addEvent({ type: 'error', error: `Failed to load session: ${err.message}` });
     }
   };
 
-  const addEvent = (event) => {
+  const addEvent = useCallback((event) => {
     setEvents(prev => [...prev, { ...event, timestamp: new Date().toISOString() }]);
-  };
+  }, []);
 
   const API_BASE = 'http://localhost:8000';
   
+  // Enhanced SSE streaming with abort support
   const streamSSE = async (path) => {
     setIsStreaming(true);
+    abortControllerRef.current = new AbortController();
     const url = `${API_BASE}${path}`;
+    
     try {
       const response = await fetch(url, {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal: abortControllerRef.current.signal
       });
       
       const reader = response.body.getReader();
@@ -87,7 +97,6 @@ export default function AgentPanel({ token, user }) {
                   i === data.step_index ? { ...s, status: 'completed' } : s
                 ));
               } else if (data.type === 'task_complete' && data.result) {
-                // Capture task results
                 const taskName = data.task?.name || data.task_name || data.message || 'Task';
                 setResults(prev => [...prev, {
                   task: taskName,
@@ -95,17 +104,14 @@ export default function AgentPanel({ token, user }) {
                   timestamp: new Date().toISOString()
                 }]);
               } else if (data.type === 'execution_stopped') {
-                // Authorization failure or other stop event
                 setStatus('stopped');
-                setFinalSummary(`⚠️ Execution Stopped\n\nReason: ${data.reason || 'unknown'}\n${data.message || ''}\n\nFailed task: ${data.failed_task || 'unknown'}`);
+                setFinalSummary(`⚠️ Execution Stopped\n\nReason: ${data.reason || 'unknown'}\n${data.message || ''}`);
               } else if (data.type === 'execution_complete') {
                 setStatus('completed');
-                // Capture final summary if provided
                 if (data.summary) {
-                  // Format summary for display
                   const summaryText = typeof data.summary === 'string' 
                     ? data.summary 
-                    : data.summary.summary || data.summary.message || JSON.stringify(data.summary, null, 2);
+                    : JSON.stringify(data.summary, null, 2);
                   setFinalSummary(summaryText);
                 }
               }
@@ -116,15 +122,41 @@ export default function AgentPanel({ token, user }) {
         }
       }
     } catch (err) {
-      addEvent({ type: 'error', error: err.message });
+      if (err.name !== 'AbortError') {
+        addEvent({ type: 'error', error: err.message });
+      }
     } finally {
       setIsStreaming(false);
+      abortControllerRef.current = null;
     }
+  };
+
+  // Stop current operation
+  const handleStop = async () => {
+    // Abort the SSE stream
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    
+    // Tell backend to stop
+    if (sessionId) {
+      try {
+        await api.stopSession(token, sessionId);
+        setStatus('stopped');
+        addEvent({ type: 'session_stopped', message: 'Session stopped by user' });
+        refreshSessions();
+      } catch (err) {
+        console.error('Failed to stop:', err);
+      }
+    }
+    
+    setIsStreaming(false);
   };
 
   const handleCreateSession = async () => {
     if (!goal.trim()) return;
     
+    // Clear state for new session
     setEvents([]);
     setPlan([]);
     setResults([]);
@@ -135,14 +167,12 @@ export default function AgentPanel({ token, user }) {
     try {
       const session = await api.createSession(token, goal);
       
-      // Check for auth errors
       if (session.detail === 'Could not validate credentials' || session.detail === 'Not authenticated') {
         addEvent({ type: 'error', error: 'Session expired. Please log in again.' });
         setStatus('idle');
         return;
       }
       
-      // Check if session_id exists
       if (!session.session_id) {
         addEvent({ type: 'error', error: `Failed to create session: ${JSON.stringify(session)}` });
         setStatus('idle');
@@ -152,8 +182,8 @@ export default function AgentPanel({ token, user }) {
       setSessionId(session.session_id);
       addEvent({ type: 'session_created', session_id: session.session_id });
       
-      // Start plan generation stream
       await streamSSE(`/stream/sessions/${session.session_id}/plan`);
+      refreshSessions(); // Update sessions list
     } catch (err) {
       addEvent({ type: 'error', error: err.message });
       setStatus('idle');
@@ -164,9 +194,21 @@ export default function AgentPanel({ token, user }) {
     if (!sessionId) return;
     
     setStatus('executing');
+    setResults([]); // Clear previous results
     addEvent({ type: 'user_action', action: 'Executing plan' });
     
     await streamSSE(`/stream/sessions/${sessionId}/execute`);
+    refreshSessions(); // Update sessions list
+  };
+
+  const handleResume = async () => {
+    if (!sessionId) return;
+    
+    setStatus('executing');
+    addEvent({ type: 'user_action', action: 'Resuming execution' });
+    
+    await streamSSE(`/stream/sessions/${sessionId}/execute`);
+    refreshSessions();
   };
 
   const handleUpdateStep = (stepIndex, field, value) => {
@@ -186,11 +228,23 @@ export default function AgentPanel({ token, user }) {
     }
   };
 
+  // Start new session (clear current)
+  const handleNewSession = () => {
+    setSessionId(null);
+    setGoal('');
+    setPlan([]);
+    setEvents([]);
+    setResults([]);
+    setFinalSummary(null);
+    setStatus('idle');
+  };
+
   const getEventIcon = (type) => {
     const icons = {
       user_action: '👤',
       session_created: '🆕',
       session_restored: '🔄',
+      session_stopped: '⏹️',
       status: '📢',
       thinking: '🤔',
       plan_step: '📝',
@@ -210,7 +264,18 @@ export default function AgentPanel({ token, user }) {
     return icons[type] || '📌';
   };
 
-  // Refresh sessions list
+  const getStatusColor = (s) => {
+    const colors = {
+      'awaiting_approval': 'bg-yellow-600',
+      'executing': 'bg-blue-600',
+      'completed': 'bg-green-600',
+      'stopped': 'bg-orange-600',
+      'planning': 'bg-purple-600',
+      'initialized': 'bg-gray-600'
+    };
+    return colors[s] || 'bg-gray-600';
+  };
+
   const refreshSessions = async () => {
     try {
       const sessions = await api.listSessions(token);
@@ -222,11 +287,10 @@ export default function AgentPanel({ token, user }) {
     }
   };
 
-  // Load sessions periodically while streaming
   useEffect(() => {
     if (token) {
       refreshSessions();
-      const interval = setInterval(refreshSessions, 10000); // Refresh every 10s
+      const interval = setInterval(refreshSessions, 10000);
       return () => clearInterval(interval);
     }
   }, [token]);
@@ -235,41 +299,77 @@ export default function AgentPanel({ token, user }) {
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* Left Panel - Controls & Plan */}
       <div className="space-y-4">
-        {/* Active Sessions Panel */}
-        {previousSessions.length > 0 && (
-          <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
-            <div className="flex items-center justify-between mb-2">
-              <h4 className="text-sm font-medium text-gray-300">📂 Active Sessions ({previousSessions.length})</h4>
+        {/* Sessions Panel - Always visible */}
+        <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-sm font-medium text-gray-300">📂 Sessions ({previousSessions.length})</h4>
+            <div className="flex gap-2">
+              <button 
+                onClick={handleNewSession}
+                className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 rounded"
+              >
+                + New
+              </button>
               <button 
                 onClick={refreshSessions}
                 className="text-xs text-gray-500 hover:text-gray-300"
               >
-                🔄 Refresh
+                🔄
               </button>
             </div>
-            <div className="space-y-1 max-h-32 overflow-y-auto">
-              {previousSessions.slice(0, 5).map((s) => (
+          </div>
+          <div className="space-y-1 max-h-40 overflow-y-auto">
+            {previousSessions.length === 0 ? (
+              <div className="text-xs text-gray-500 text-center py-2">No sessions yet</div>
+            ) : (
+              previousSessions.map((s) => (
                 <div 
                   key={s.session_id}
-                  onClick={() => !isStreaming && restoreSession(s.session_id)}
-                  className={`flex items-center justify-between p-2 rounded cursor-pointer text-xs
-                    ${sessionId === s.session_id ? 'bg-blue-900/50 border border-blue-600' : 'bg-gray-700/50 hover:bg-gray-700'}
-                    ${isStreaming ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  onClick={() => restoreSession(s.session_id)}
+                  className={`flex items-center justify-between p-2 rounded cursor-pointer text-xs transition-colors
+                    ${sessionId === s.session_id ? 'bg-blue-900/50 border border-blue-600' : 'bg-gray-700/50 hover:bg-gray-700'}`}
                 >
                   <div className="flex-1 truncate">
-                    <span className="text-gray-400 mr-2">{s.session_id.slice(0, 8)}...</span>
-                    <span className="text-gray-300">{s.goal?.slice(0, 30) || 'No goal'}...</span>
+                    <span className="text-gray-400 mr-2 font-mono">{s.session_id.slice(0, 8)}</span>
+                    <span className="text-gray-300">{s.goal?.slice(0, 25) || 'No goal'}</span>
                   </div>
-                  <span className={`px-2 py-0.5 rounded text-xs ml-2 ${
-                    s.status === 'awaiting_approval' ? 'bg-yellow-900 text-yellow-300' :
-                    s.status === 'executing' ? 'bg-blue-900 text-blue-300' :
-                    s.status === 'completed' ? 'bg-green-900 text-green-300' :
-                    'bg-gray-600 text-gray-300'
-                  }`}>
-                    {s.status === 'awaiting_approval' ? 'pending' : s.status}
+                  <span className={`px-2 py-0.5 rounded text-xs ml-2 text-white ${getStatusColor(s.status)}`}>
+                    {s.status === 'awaiting_approval' ? 'ready' : s.status}
                   </span>
                 </div>
-              ))}
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Current Session Info */}
+        {sessionId && (
+          <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-xs text-gray-500">Session: </span>
+                <span className="text-xs font-mono text-gray-300">{sessionId.slice(0, 12)}...</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`px-2 py-0.5 rounded text-xs text-white ${
+                  status === 'planning' ? 'bg-purple-600' :
+                  status === 'planned' ? 'bg-yellow-600' :
+                  status === 'executing' ? 'bg-blue-600' :
+                  status === 'completed' ? 'bg-green-600' :
+                  status === 'stopped' ? 'bg-orange-600' :
+                  'bg-gray-600'
+                }`}>
+                  {status}
+                </span>
+                {isStreaming && (
+                  <button
+                    onClick={handleStop}
+                    className="px-2 py-1 text-xs bg-red-600 hover:bg-red-700 rounded"
+                  >
+                    ⏹ Stop
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -298,13 +398,13 @@ export default function AgentPanel({ token, user }) {
             className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded resize-none h-24 focus:outline-none focus:border-blue-500"
             disabled={isStreaming}
           />
-          <div className="flex gap-2 mt-3">
+          <div className="flex flex-wrap gap-2 mt-3">
             <button
               onClick={handleCreateSession}
               disabled={isStreaming || !goal.trim()}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded font-medium transition-colors"
             >
-              {status === 'idle' ? '🚀 Create Plan' : '🔄 New Session'}
+              🚀 Create Plan
             </button>
             {status === 'planned' && (
               <>
@@ -313,7 +413,7 @@ export default function AgentPanel({ token, user }) {
                   disabled={isStreaming}
                   className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 rounded font-medium transition-colors"
                 >
-                  💾 Save Changes
+                  💾 Save
                 </button>
                 <button
                   onClick={handleExecutePlan}
@@ -323,6 +423,20 @@ export default function AgentPanel({ token, user }) {
                   ▶️ Execute Plan
                 </button>
               </>
+            )}
+            {status === 'stopped' && (
+              <button
+                onClick={handleResume}
+                disabled={isStreaming}
+                className="px-4 py-2 bg-orange-600 hover:bg-orange-700 disabled:bg-gray-600 rounded font-medium transition-colors"
+              >
+                ▶️ Resume
+              </button>
+            )}
+            {status === 'completed' && (
+              <span className="px-4 py-2 text-green-400 flex items-center gap-2">
+                ✅ Completed
+              </span>
             )}
           </div>
         </div>

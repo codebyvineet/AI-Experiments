@@ -25,7 +25,6 @@ export const api = {
       headers: { 'Authorization': `Bearer ${token}` }
     });
     const data = await res.json();
-    // Normalize the response - backend returns user_id, frontend expects id
     return {
       ...data,
       id: data.user_id || data.id,
@@ -45,7 +44,6 @@ export const api = {
       headers: { 'Authorization': `Bearer ${token}` }
     });
     const data = await res.json();
-    // API returns array directly, wrap it
     return { items: Array.isArray(data) ? data : (data.items || []) };
   },
 
@@ -81,7 +79,7 @@ export const api = {
     return res.json();
   },
 
-  // Streaming Sessions
+  // Session Management
   async createSession(token, goal) {
     const res = await fetch(`${API_BASE}/stream/sessions`, {
       method: 'POST',
@@ -110,8 +108,35 @@ export const api = {
       headers: { 'Authorization': `Bearer ${token}` }
     });
     const data = await res.json();
-    // API returns {sessions: [...]} - extract array
     return data.sessions || [];
+  },
+
+  async stopSession(token, sessionId) {
+    const res = await fetch(`${API_BASE}/stream/sessions/${sessionId}/stop`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    return res.json();
+  },
+
+  async resumeSession(token, sessionId) {
+    const res = await fetch(`${API_BASE}/stream/sessions/${sessionId}/resume`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    return res.json();
+  },
+
+  async sendMessage(token, sessionId, content) {
+    const res = await fetch(`${API_BASE}/stream/sessions/${sessionId}/message`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ content })
+    });
+    return res.json();
   },
 
   async updatePlan(token, sessionId, plan) {
@@ -124,59 +149,6 @@ export const api = {
       body: JSON.stringify({ session_id: sessionId, plan })
     });
     return res.json();
-  },
-
-  // SSE Streaming endpoints
-  streamPlanGeneration(token, sessionId, onEvent, onError, onComplete) {
-    const eventSource = new EventSource(
-      `${API_BASE}/stream/sessions/${sessionId}/plan?token=${token}`
-    );
-    
-    eventSource.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        onEvent(data);
-        if (data.type === 'plan_complete' || data.type === 'error') {
-          eventSource.close();
-          onComplete?.();
-        }
-      } catch (err) {
-        console.error('Parse error:', err);
-      }
-    };
-
-    eventSource.onerror = (e) => {
-      eventSource.close();
-      onError?.(e);
-    };
-
-    return () => eventSource.close();
-  },
-
-  streamPlanExecution(token, sessionId, onEvent, onError, onComplete) {
-    const eventSource = new EventSource(
-      `${API_BASE}/stream/sessions/${sessionId}/execute?token=${token}`
-    );
-    
-    eventSource.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        onEvent(data);
-        if (data.type === 'execution_complete' || data.type === 'error') {
-          eventSource.close();
-          onComplete?.();
-        }
-      } catch (err) {
-        console.error('Parse error:', err);
-      }
-    };
-
-    eventSource.onerror = (e) => {
-      eventSource.close();
-      onError?.(e);
-    };
-
-    return () => eventSource.close();
   },
 
   // MCP
@@ -199,7 +171,6 @@ export const api = {
     return res.json();
   },
 
-  // MCP Server info
   async getMcpCapabilities() {
     const res = await fetch(`${API_BASE}/mcp/capabilities`);
     return res.json();

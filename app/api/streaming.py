@@ -274,23 +274,118 @@ async def list_sessions(
     return {"sessions": sessions}
 
 
+@router.post("/sessions/{session_id}/stop")
+async def stop_session(
+    session_id: str,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Stop a running session gracefully.
+    
+    Saves checkpoint to MongoDB so session can be resumed later.
+    Works for both planning and executing states.
+    """
+    request_id = str(uuid.uuid4())[:8]
+    log = LogContext(logger, request_id=request_id, session_id=session_id, user_id=current_user.user_id)
+    
+    log.info("📥 Request: Stop session")
+    
+    orchestrator = await get_orchestrator()
+    
+    # Verify ownership
+    state = await orchestrator.get_session_state(session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if state.get("user_id") != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Stop execution (checkpoints are saved automatically)
+    result = await orchestrator.stop_execution(session_id)
+    
+    log.info("📤 Response: Session stopped", data=result)
+    
+    return result
+
+
+@router.post("/sessions/{session_id}/resume")
+async def resume_session(
+    session_id: str,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Resume a stopped session from its checkpoint.
+    
+    Returns session state and streams execution if needed.
+    """
+    request_id = str(uuid.uuid4())[:8]
+    log = LogContext(logger, request_id=request_id, session_id=session_id, user_id=current_user.user_id)
+    
+    log.info("📥 Request: Resume session")
+    
+    orchestrator = await get_orchestrator()
+    
+    # Get resume info
+    resume_info = await orchestrator.resume_session(session_id)
+    
+    if not resume_info.get("resumable"):
+        raise HTTPException(
+            status_code=400, 
+            detail=resume_info.get("reason", "Session cannot be resumed")
+        )
+    
+    # Verify ownership
+    if resume_info.get("user_id") and resume_info.get("user_id") != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    log.info("📤 Response: Session resume info", data=resume_info)
+    
+    return resume_info
+
+
+class MessageRequest(BaseModel):
+    content: str
+
+
 @router.post("/sessions/{session_id}/message")
 async def add_message(
     session_id: str,
-    content: str = Query(..., description="Message content"),
+    request: MessageRequest,
     current_user: TokenData = Depends(get_current_user)
 ):
-    """Add a user message - triggers re-plan if needed."""
-    # In LangGraph, messages can trigger re-planning
+    """
+    Add a user message to a session.
+    
+    Behavior depends on current session state:
+    - awaiting_approval: Message modifies the goal, triggers re-plan
+    - executing: Stops execution and re-plans with new context
+    - completed/stopped: Starts new planning cycle with message as new goal
+    """
+    request_id = str(uuid.uuid4())[:8]
+    log = LogContext(logger, request_id=request_id, session_id=session_id, user_id=current_user.user_id)
+    
+    log.info("📥 Request: Add message", data={"content": request.content[:100]})
+    
     orchestrator = await get_orchestrator()
+    
+    # Verify ownership
+    state = await orchestrator.get_session_state(session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if state.get("user_id") != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
     mcp_token = await create_mcp_token(current_user)
     
-    # Use replan feature with the new message as context
+    # Use replan feature with the new message
     result = await orchestrator.interrupt_and_replan(
         session_id,
-        content,  # New message becomes the new goal/modification
+        request.content,
         mcp_token
     )
+    
+    log.info("📤 Response: Message processed", data={"status": result.get("status")})
     
     return {"message": "Message processed", "result": result}
 
