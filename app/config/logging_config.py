@@ -170,14 +170,16 @@ class LogContext:
     
     def ai_request(self, prompt: str, model: str = "gemini"):
         """Log AI request - full prompt with grepable prefix."""
-        # Use logger.info with [AIFLOW] prefix for grepable output
-        self.logger.info(f"[AIFLOW] AI Prompt: {prompt}")
+        # Escape newlines for single-line grepable output
+        escaped_prompt = prompt.replace('\n', '\\n')
+        self.logger.info(f"[AIFLOW] AI Prompt: {escaped_prompt}")
         self.info(f"🤖 AI Request to {model}", data={"prompt_length": len(prompt)})
     
     def ai_response(self, response: str, duration_ms: int):
         """Log AI response - full response with grepable prefix."""
-        # Use logger.info with [AIFLOW] prefix for grepable output
-        self.logger.info(f"[AIFLOW] AI Response: {response}")
+        # Escape newlines for single-line grepable output
+        escaped_response = response.replace('\n', '\\n')
+        self.logger.info(f"[AIFLOW] AI Response: {escaped_response}")
         self.info(f"✅ AI Response received", data={"response_length": len(response)}, duration_ms=duration_ms)
     
     def agent_start(self, agent_name: str, task: str):
