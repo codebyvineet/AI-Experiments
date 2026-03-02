@@ -439,16 +439,20 @@ export default function AgentPanel({ token, user }) {
             onChange={(e) => setGoal(e.target.value)}
             placeholder="E.g., Search and analyze data, then create a report and store it..."
             className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded resize-none h-24 focus:outline-none focus:border-blue-500"
-            disabled={isStreaming}
+            disabled={isStreaming || !!sessionId}
           />
           <div className="flex flex-wrap gap-2 mt-3">
-            <button
-              onClick={handleCreateSession}
-              disabled={isStreaming || !goal.trim()}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded font-medium transition-colors"
-            >
-              🚀 Create Plan
-            </button>
+            {/* Create Plan - Only for new sessions */}
+            {!sessionId && (
+              <button
+                onClick={handleCreateSession}
+                disabled={isStreaming || !goal.trim()}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded font-medium transition-colors"
+              >
+                🚀 Create Plan
+              </button>
+            )}
+            {/* Execute Plan - For planned sessions */}
             {status === 'planned' && (
               <button
                 onClick={handleExecutePlan}
@@ -458,6 +462,7 @@ export default function AgentPanel({ token, user }) {
                 ▶️ Execute Plan
               </button>
             )}
+            {/* Resume - For stopped sessions */}
             {status === 'stopped' && (
               <button
                 onClick={handleResume}
@@ -467,9 +472,17 @@ export default function AgentPanel({ token, user }) {
                 ▶️ Resume
               </button>
             )}
+            {/* Completed status */}
             {status === 'completed' && (
               <span className="px-4 py-2 text-green-400 flex items-center gap-2">
                 ✅ Completed
+              </span>
+            )}
+            {/* Executing status */}
+            {status === 'executing' && (
+              <span className="px-4 py-2 text-blue-400 flex items-center gap-2">
+                <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></span>
+                Executing...
               </span>
             )}
           </div>
