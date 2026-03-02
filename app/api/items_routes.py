@@ -11,17 +11,6 @@ from app.models import Item, ItemCreate, ItemUpdate, TokenData
 router = APIRouter(prefix="/items", tags=["items"])
 
 
-# Request models for batch operations
-class BulkCreateRequest(BaseModel):
-    """Request model for bulk item creation."""
-    items: List[ItemCreate]
-
-
-class BulkDeleteRequest(BaseModel):
-    """Request model for bulk item deletion."""
-    item_ids: List[str]
-
-
 @router.post("/", response_model=Item)
 async def create_item(
     item_data: ItemCreate,
@@ -63,41 +52,6 @@ async def search_items(
     """
     results = await item_crud.search_items(q, field, limit, offset)
     return results
-
-
-@router.get("/stats")
-async def get_statistics(
-    current_user: TokenData = Depends(require_permission("items:read"))
-) -> Dict[str, Any]:
-    """Get statistics about items in the database."""
-    stats = await item_crud.get_statistics(current_user.user_id)
-    return stats
-
-
-@router.post("/batch/create")
-async def bulk_create(
-    request: BulkCreateRequest,
-    current_user: TokenData = Depends(require_permission("items:write"))
-) -> Dict[str, Any]:
-    """Create multiple items in a single operation."""
-    created_items = await item_crud.bulk_create(request.items, current_user.user_id)
-    return {
-        "created": len(created_items),
-        "items": created_items
-    }
-
-
-@router.post("/batch/delete")
-async def bulk_delete(
-    request: BulkDeleteRequest,
-    current_user: TokenData = Depends(require_permission("items:delete"))
-) -> Dict[str, Any]:
-    """Delete multiple items in a single operation."""
-    deleted_count = await item_crud.bulk_delete(request.item_ids, current_user.user_id)
-    return {
-        "deleted": deleted_count,
-        "requested": len(request.item_ids)
-    }
 
 
 @router.get("/{item_id}", response_model=Item)

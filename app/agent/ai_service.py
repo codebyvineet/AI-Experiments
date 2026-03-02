@@ -21,10 +21,10 @@ def get_system_tools_description() -> str:
     return """
 ## Available MCP Tools (Model Context Protocol)
 
-You have access to the following tools via the MCP Server. Use these tools in your plans.
+You have access to the following tools via the MCP Server.
 All operations go through the MCP Server which handles authorization.
 
-### Item Management Tools
+### Item CRUD Tools
 1. **create_item** - Create a new item in the database
    - Parameters: name (string, required), description (string), data (object)
    
@@ -40,30 +40,8 @@ All operations go through the MCP Server which handles authorization.
 5. **list_items** - List all items with pagination
    - Parameters: skip (integer, default 0), limit (integer, default 100)
 
-### Search Tools
 6. **search_items** - Search items by text query
    - Parameters: query (string, required), field (string: all|name|description|data), limit, offset
-
-### Statistics & Report Tools
-7. **get_statistics** - Get database statistics
-   - Parameters: none
-
-8. **generate_report** - Generate a report
-    - Parameters: report_type (summary|detailed|activity), filters (object)
-
-### User Tools
-9. **get_user_profile** - Get current user's profile
-    - Parameters: none
-
-10. **update_user_profile** - Update user profile
-     - Parameters: display_name, email, preferences
-
-## System Capabilities
-- MCP Server handles all tool execution with proper authorization
-- MongoDB for data storage
-- Redis for caching
-- JWT-based authentication
-- Real-time streaming via SSE
 """
 
 
@@ -196,22 +174,26 @@ Create a JSON execution plan using the available MCP tools.
 
 2. **ONE TOOL CALL = ONE SUB-TASK**: Each sub-task calls exactly one MCP tool. If the user asks to operate on N items, create N sub-tasks — one per item, each with its own concrete tool_params.
 
-3. **THINK ABOUT DEPENDENCIES TO CHOOSE EXECUTION MODE**:
+3. **ANALYSIS SUB-TASKS**: For questions that require reasoning, counting, grouping, or computing over data (e.g., "how many from Dublin", "average salary per country"), use a two-step plan:
+   - Step 1: Fetch the data with a tool (e.g., list_items or search_items)
+   - Step 2: An analysis sub-task with "tool": null that describes what to compute. The AI will receive the fetched data and reason over it.
+
+4. **THINK ABOUT DEPENDENCIES TO CHOOSE EXECUTION MODE**:
    - "parallel": Sub-tasks that do NOT depend on each other's output (e.g., creating several items, querying unrelated data)
    - "sequential": Sub-tasks where one needs the result of a previous one (e.g., search first, then update the found item)
 
-4. **USE REAL VALUES**: Extract actual values from the user's goal into tool_params. NEVER use placeholders like "from_previous_step". Each tool call must be self-contained.
+5. **USE REAL VALUES**: Extract actual values from the user's goal into tool_params. NEVER use placeholders like "from_previous_step". Each tool call must be self-contained.
 
-5. **NO FILLER**: No sub-tasks for "validate", "consolidate", "analyze", or "summarize". Results flow automatically between steps. Only create sub-tasks that call a real tool.
+6. **NO FILLER STEPS**: Do not add sub-tasks just to validate or confirm. But DO add analysis sub-tasks when the user asks a question that requires computation over fetched data.
 
-6. **STEP COUNT = DEPENDENCY DEPTH**: Group independent work into one step. Only create a new step when it needs results from the previous step. Maximum 4 steps.
+7. **STEP COUNT = DEPENDENCY DEPTH**: Group independent work into one step. Only create a new step when it needs results from the previous step. Maximum 4 steps.
 
 Response format:
 {{
     "analysis": "Brief reasoning: what the user wants, which tools to use, and whether operations are independent (parallel) or dependent (sequential/multi-step)",
     "steps": [
         {{
-            "phase": "research|execution|data_operations",
+            "phase": "research|execution|data_operations|analysis",
             "description": "What this step does",
             "agent_type": "research|execution",
             "execution_mode": "sequential|parallel",
@@ -219,7 +201,7 @@ Response format:
                 {{
                     "name": "Descriptive task name",
                     "description": "What this sub-task does",
-                    "tool": "exact tool name from list above",
+                    "tool": "tool name from list above, or null for AI analysis",
                     "tool_params": {{}}
                 }}
             ],
@@ -446,12 +428,14 @@ DESCRIPTION: {task_description}
 
 GOAL: {context.get('goal', '')}
 
-Execute this task based on the data above. If previous results contain the answer, use it directly.
+Execute this task based on the data above. If previous results contain data you need, analyze it thoroughly.
+
+IMPORTANT: Your "result" field must contain the ACTUAL answer with specific numbers, names, and details — not just a summary like "analysis complete". Show your work.
 
 Respond with JSON:
 {{
     "status": "success|partial|failed",
-    "result": "Description of what was accomplished or the answer",
+    "result": "The detailed answer with actual data, numbers, and breakdowns",
     "output_data": {{}},
     "notes": "Any observations"
 }}

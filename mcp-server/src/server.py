@@ -171,68 +171,6 @@ async def search_items(
 
 
 # ============================================================================
-# STATISTICS & REPORTS
-# ============================================================================
-
-@mcp.tool
-async def get_statistics(
-    auth_token: str = Field(default="", description="Authorization token (injected by wrapper)")
-) -> dict:
-    """Get database statistics including total items and recent activity."""
-    logger.info("[get_statistics] Fetching stats")
-    return await backend_request("GET", "/items/stats", token=auth_token)
-
-
-@mcp.tool
-async def generate_report(
-    report_type: str = Field(description="Type of report: summary, detailed, activity"),
-    auth_token: str = Field(default="", description="Authorization token (injected by wrapper)"),
-    filters: dict = Field(default_factory=dict, description="Optional filters for the report")
-) -> dict:
-    """Generate a report based on the specified type and filters."""
-    logger.info(f"[generate_report] Generating {report_type} report")
-    return await backend_request(
-        "POST", "/reports/generate",
-        token=auth_token,
-        json_data={"report_type": report_type, "filters": filters}
-    )
-
-
-# ============================================================================
-# USER TOOLS
-# ============================================================================
-
-@mcp.tool
-async def get_user_profile(
-    auth_token: str = Field(default="", description="Authorization token (injected by wrapper)")
-) -> dict:
-    """Get the current user's profile information."""
-    logger.info("[get_user_profile] Fetching profile")
-    return await backend_request("GET", "/users/me", token=auth_token)
-
-
-@mcp.tool
-async def update_user_profile(
-    auth_token: str = Field(default="", description="Authorization token (injected by wrapper)"),
-    display_name: Optional[str] = Field(default=None, description="New display name"),
-    email: Optional[str] = Field(default=None, description="New email address"),
-    preferences: Optional[dict] = Field(default=None, description="User preferences")
-) -> dict:
-    """Update the current user's profile."""
-    logger.info("[update_user_profile] Updating profile")
-    
-    profile_data = {}
-    if display_name is not None:
-        profile_data["display_name"] = display_name
-    if email is not None:
-        profile_data["email"] = email
-    if preferences is not None:
-        profile_data["preferences"] = preferences
-    
-    return await backend_request("PUT", "/users/me", token=auth_token, json_data=profile_data)
-
-
-# ============================================================================
 # MAIN ENTRY POINT
 # ============================================================================
 
