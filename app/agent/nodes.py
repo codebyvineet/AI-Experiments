@@ -1,0 +1,389 @@
+"""LangGraph node implementations for multi-agent orchestration.
+
+This module contains all the node functions for the LangGraph state machine:
+- Planner: Generates execution plans using AI
+- Approval: Human-in-the-loop approval checkpoint
+- Executor: Executes plan steps (parallel or sequential)
+- Summary: Generates final execution summary
+"""
+
+import json
+import time
+import asyncio
+from typing import Dict, Any, List, Literal
+from datetime import datetime, timezone
+
+from langgraph.types import interrupt, Send
+
+from app.agent.state import AgentState, PlanStep, TaskResult
+from app.agent.tools import call_mcp_tool
+from app.config.logging_config import get_logger, LogContext
+
+logger = get_logger("langgraph_nodes")
+
+
+# ============================================================================
+# PLANNER NODE
+# ============================================================================
+
+async def planner_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Generate an execution plan using AI.
+    
+    This node:
+    1. Takes the user's goal
+    2. Calls AI to generate a structured plan
+    3. Returns the plan for approval
+    
+    Note: Does NOT check user permissions - that happens at execution time.
+    """
+    log = LogContext(logger, session_id=state["session_id"], agent="planner")
+    log.info(f"🎯 Starting plan generation for goal: {state['goal']}")
+    
+    start_time = time.time()
+    
+    try:
+        # Import here to avoid circular imports
+        from app.agent.ai_service import ai_service
+        
+        # Generate plan using AI
+        plan_steps: List[PlanStep] = []
+        
+        async for event in ai_service.generate_plan(
+            goal=state["goal"],
+            session_id=state["session_id"],
+            context={"user_id": state["user_id"], "messages": state.get("messages", [])[-5:]},
+            user_permissions=[]  # Don't pass permissions - AI plans freely
+        ):
+            if event["type"] == "plan_step":
+                step = event["step"]
+                # Add step_id if not present
+                if "step_id" not in step:
+                    step["step_id"] = f"step-{len(plan_steps)}"
+                step["status"] = "pending"
+                plan_steps.append(step)
+                log.info(f"📍 Plan step {len(plan_steps)}: {step.get('description', 'Unknown')}")
+        
+        duration_ms = int((time.time() - start_time) * 1000)
+        log.info(f"✅ Plan generation complete: {len(plan_steps)} steps in {duration_ms}ms")
+        
+        return {
+            "plan": plan_steps,
+            "status": "awaiting_approval",
+            "messages": [{
+                "role": "assistant",
+                "content": f"Plan generated with {len(plan_steps)} steps. Awaiting approval.",
+                "timestamp": datetime.utcnow().isoformat()
+            }]
+        }
+        
+    except Exception as e:
+        log.error(f"❌ Plan generation failed: {e}")
+        return {
+            "status": "failed",
+            "error": str(e),
+            "messages": [{
+                "role": "system",
+                "content": f"Plan generation failed: {e}",
+                "timestamp": datetime.utcnow().isoformat()
+            }]
+        }
+
+
+# ============================================================================
+# APPROVAL NODE (Human-in-the-Loop)
+# ============================================================================
+
+def approval_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Human-in-the-loop approval checkpoint.
+    
+    This node uses LangGraph's interrupt() to pause execution
+    and wait for human approval of the plan.
+    """
+    log = LogContext(logger, session_id=state["session_id"], agent="approval")
+    log.info(f"⏸️ Awaiting human approval for plan with {len(state.get('plan', []))} steps")
+    
+    # Use LangGraph interrupt to pause and wait for approval
+    approval_response = interrupt({
+        "type": "plan_approval",
+        "plan": state.get("plan", []),
+        "message": "Please review and approve the execution plan",
+        "session_id": state["session_id"]
+    })
+    
+    approved = approval_response.get("approved", False)
+    
+    log.info(f"{'✅' if approved else '❌'} Plan {'approved' if approved else 'rejected'}")
+    
+    return {
+        "approved": approved,
+        "status": "executing" if approved else "failed",
+        "messages": [{
+            "role": "system",
+            "content": f"Plan {'approved' if approved else 'rejected'} by user",
+            "timestamp": datetime.utcnow().isoformat()
+        }]
+    }
+
+
+# ============================================================================
+# EXECUTOR NODE (Fan-out for parallel execution)
+# ============================================================================
+
+def executor_dispatch(state: AgentState) -> List[Send]:
+    """
+    Dispatch tasks for parallel or sequential execution.
+    
+    This is the fan-out function that creates Send() calls
+    for parallel task execution in LangGraph.
+    """
+    log = LogContext(logger, session_id=state["session_id"], agent="executor")
+    
+    # Check if approved
+    if not state.get("approved", False):
+        log.info("❌ Plan not approved, skipping execution")
+        return []
+    
+    plan = state.get("plan", [])
+    current_step = state.get("current_step", 0)
+    
+    if current_step >= len(plan):
+        log.info("✅ All steps completed")
+        return []
+    
+    step = plan[current_step]
+    sub_tasks = step.get("sub_tasks", [])
+    execution_mode = step.get("execution_mode", "sequential")
+    
+    log.info(f"📋 Dispatching step {current_step + 1}/{len(plan)}: {step.get('description')}")
+    log.info(f"   Mode: {execution_mode}, Tasks: {len(sub_tasks)}")
+    
+    # Create Send() calls for each task
+    sends = []
+    for i, task in enumerate(sub_tasks):
+        sends.append(Send("task_executor", {
+            "session_id": state["session_id"],
+            "token": state["token"],
+            "step_index": current_step,
+            "task_index": i,
+            "task": task,
+            "goal": state["goal"],
+            "step_description": step.get("description", "")
+        }))
+    
+    return sends
+
+
+async def task_executor_node(task_state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Execute a single task.
+    
+    This node is called in parallel for each task in a step.
+    It handles MCP tool calls and authorization failures.
+    """
+    session_id = task_state["session_id"]
+    token = task_state["token"]
+    task = task_state["task"]
+    task_index = task_state["task_index"]
+    
+    log = LogContext(logger, session_id=session_id, agent="task_executor")
+    
+    task_name = task.get("name", f"Task {task_index}")
+    tool_name = task.get("tool")
+    tool_params = task.get("tool_params", {})
+    
+    log.info(f"🔄 Executing task: {task_name}")
+    
+    start_time = time.time()
+    
+    try:
+        if tool_name:
+            # Call MCP tool
+            result = await call_mcp_tool(tool_name, tool_params, token)
+            
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            return {
+                "results": [TaskResult(
+                    task_name=task_name,
+                    tool=tool_name,
+                    status=result.get("status", "success"),
+                    result=result.get("result"),
+                    duration_ms=duration_ms
+                )]
+            }
+        else:
+            # No tool specified - use AI to process
+            from app.agent.ai_service import ai_service
+            
+            result = await ai_service.execute_task(
+                task_name=task_name,
+                task_description=task.get("description", task_name),
+                context={
+                    "goal": task_state["goal"],
+                    "step": task_state["step_description"],
+                    "tool": None,
+                    "tool_params": {}
+                },
+                session_id=session_id,
+                step_info={"description": task_state["step_description"]},
+                token=token
+            )
+            
+            duration_ms = int((time.time() - start_time) * 1000)
+            
+            return {
+                "results": [TaskResult(
+                    task_name=task_name,
+                    tool=None,
+                    status=result.get("status", "success"),
+                    result=result.get("result"),
+                    duration_ms=duration_ms
+                )]
+            }
+            
+    except Exception as e:
+        log.error(f"❌ Task failed: {task_name} - {e}")
+        duration_ms = int((time.time() - start_time) * 1000)
+        
+        return {
+            "results": [TaskResult(
+                task_name=task_name,
+                tool=tool_name,
+                status="failed",
+                result=None,
+                error=str(e),
+                duration_ms=duration_ms
+            )]
+        }
+
+
+def step_aggregator_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Aggregate results from parallel task execution and advance to next step.
+    
+    This node:
+    1. Checks if any task failed with authorization error
+    2. Updates current_step to advance to next step
+    3. Marks step as completed
+    """
+    log = LogContext(logger, session_id=state["session_id"], agent="aggregator")
+    
+    results = state.get("results", [])
+    current_step = state.get("current_step", 0)
+    plan = state.get("plan", [])
+    
+    # Check for authorization failures
+    auth_failures = [r for r in results if r.get("status") == "authorization_failed"]
+    if auth_failures:
+        failed_task = auth_failures[0]
+        log.error(f"🚫 Authorization failure in task: {failed_task.get('task_name')}")
+        return {
+            "status": "failed",
+            "error": f"Authorization failed: {failed_task.get('result')}",
+            "messages": [{
+                "role": "system",
+                "content": f"Execution stopped due to authorization failure",
+                "timestamp": datetime.utcnow().isoformat()
+            }]
+        }
+    
+    # Update step status
+    if current_step < len(plan):
+        plan[current_step]["status"] = "completed"
+    
+    # Advance to next step
+    next_step = current_step + 1
+    
+    log.info(f"✅ Step {current_step + 1} completed, advancing to step {next_step + 1}")
+    
+    return {
+        "current_step": next_step,
+        "plan": plan,
+        "messages": [{
+            "role": "system",
+            "content": f"Completed step {current_step + 1}/{len(plan)}",
+            "timestamp": datetime.utcnow().isoformat()
+        }]
+    }
+
+
+# ============================================================================
+# SUMMARY NODE
+# ============================================================================
+
+async def summary_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Generate final execution summary.
+    
+    Called after all steps are completed (or on failure).
+    """
+    log = LogContext(logger, session_id=state["session_id"], agent="summary")
+    log.info(f"📊 Generating execution summary")
+    
+    results = state.get("results", [])
+    plan = state.get("plan", [])
+    
+    # Calculate statistics
+    total_tasks = len(results)
+    successful_tasks = sum(1 for r in results if r.get("status") == "success")
+    failed_tasks = sum(1 for r in results if r.get("status") in ["failed", "authorization_failed"])
+    total_duration = sum(r.get("duration_ms", 0) for r in results)
+    
+    # Determine overall status
+    if state.get("status") == "failed":
+        overall_status = "failed"
+    elif failed_tasks > 0:
+        overall_status = "partial_success"
+    else:
+        overall_status = "success"
+    
+    summary = {
+        "goal": state.get("goal"),
+        "overall_status": overall_status,
+        "total_steps": len(plan),
+        "completed_steps": sum(1 for s in plan if s.get("status") == "completed"),
+        "total_tasks": total_tasks,
+        "successful_tasks": successful_tasks,
+        "failed_tasks": failed_tasks,
+        "total_duration_ms": total_duration,
+        "error": state.get("error")
+    }
+    
+    log.info(f"✅ Summary: {overall_status} - {successful_tasks}/{total_tasks} tasks succeeded")
+    
+    return {
+        "summary": summary,
+        "status": "completed",
+        "messages": [{
+            "role": "assistant",
+            "content": f"Execution complete: {successful_tasks}/{total_tasks} tasks succeeded",
+            "timestamp": datetime.utcnow().isoformat()
+        }]
+    }
+
+
+# ============================================================================
+# ROUTING FUNCTIONS
+# ============================================================================
+
+def should_continue(state: AgentState) -> Literal["executor", "summary"]:
+    """Determine if execution should continue or finish."""
+    if state.get("status") == "failed":
+        return "summary"
+    
+    current_step = state.get("current_step", 0)
+    plan = state.get("plan", [])
+    
+    if current_step >= len(plan):
+        return "summary"
+    
+    return "executor"
+
+
+def check_approval(state: AgentState) -> Literal["executor", "summary"]:
+    """Check if plan was approved."""
+    if state.get("approved", False):
+        return "executor"
+    return "summary"
