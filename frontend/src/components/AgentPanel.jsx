@@ -29,7 +29,11 @@ export default function AgentPanel({ token, user }) {
       if (session) {
         setSessionId(session.session_id || sid);
         setGoal(session.goal || '');
-        setPlan(session.plan || []);
+        // Initialize plan steps with status
+        setPlan((session.plan || []).map(step => ({
+          ...step, 
+          status: session.status === 'completed' ? 'completed' : (step.status || 'pending')
+        })));
         setResults(session.results || []);
         
         // Map backend status to frontend status
@@ -89,12 +93,13 @@ export default function AgentPanel({ token, user }) {
               
               // Handle specific events
               if (data.type === 'plan_step') {
-                setPlan(prev => [...prev, data.step]);
+                setPlan(prev => [...prev, { ...data.step, status: 'pending' }]);
               } else if (data.type === 'plan_complete') {
-                setPlan(data.plan);
+                // Initialize all steps with pending status
+                setPlan(data.plan.map(step => ({ ...step, status: step.status || 'pending' })));
                 setStatus('planned');
               } else if (data.type === 'step_start') {
-                // Mark current step as running
+                // Mark current step as running, previous as completed
                 setPlan(prev => prev.map((s, i) => ({
                   ...s,
                   status: i === data.step_number - 1 ? 'running' : 
@@ -104,6 +109,16 @@ export default function AgentPanel({ token, user }) {
                 setPlan(prev => prev.map((s, i) => 
                   i === data.step_number - 1 ? { ...s, status: 'completed' } : s
                 ));
+              } else if (data.type === 'execution_complete') {
+                // Mark all steps as completed when execution finishes
+                setPlan(prev => prev.map(s => ({ ...s, status: 'completed' })));
+                setStatus('completed');
+                if (data.summary) {
+                  const summaryText = typeof data.summary === 'string' 
+                    ? data.summary 
+                    : JSON.stringify(data.summary, null, 2);
+                  setFinalSummary(summaryText);
+                }
               } else if (data.type === 'task_complete') {
                 const taskName = data.task_name || data.message || 'Task';
                 const taskStatus = data.status || 'completed';
@@ -118,14 +133,6 @@ export default function AgentPanel({ token, user }) {
               } else if (data.type === 'execution_stopped') {
                 setStatus('stopped');
                 setFinalSummary(`⚠️ Execution Stopped\n\nReason: ${data.reason || 'unknown'}\n${data.message || ''}`);
-              } else if (data.type === 'execution_complete') {
-                setStatus('completed');
-                if (data.summary) {
-                  const summaryText = typeof data.summary === 'string' 
-                    ? data.summary 
-                    : JSON.stringify(data.summary, null, 2);
-                  setFinalSummary(summaryText);
-                }
               }
             } catch (e) {
               console.error('Parse error:', e);
