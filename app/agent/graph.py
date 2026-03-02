@@ -556,7 +556,7 @@ class LangGraphOrchestrator:
                         total_steps = len(event_state.get("plan", []))
                         yield {
                             "type": "step_start",
-                            "step": current_step,
+                            "step_number": current_step + 1,  # 1-indexed for frontend
                             "total_steps": total_steps,
                             "message": f"Executing step {current_step + 1} of {total_steps}"
                         }
