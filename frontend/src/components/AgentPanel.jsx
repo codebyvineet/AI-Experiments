@@ -473,6 +473,32 @@ export default function AgentPanel({ token, user }) {
               </span>
             )}
           </div>
+          
+          {/* Add More Input - Always visible when session exists */}
+          {sessionId && (
+            <div className="mt-4 pt-4 border-t border-gray-600">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={messageInput}
+                  onChange={(e) => setMessageInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                  placeholder="Add more context or change the goal..."
+                  className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
+                />
+                <button
+                  onClick={handleSendMessage}
+                  disabled={!messageInput.trim()}
+                  className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded text-sm font-medium transition-colors"
+                >
+                  ➕ Add Input
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Add more details and AI will update the plan accordingly
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Plan Editor */}
@@ -601,30 +627,6 @@ export default function AgentPanel({ token, user }) {
         </div>
         
         {/* Message Input - Always visible when session exists */}
-        {sessionId && (
-          <div className="p-3 border-t border-gray-700">
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={messageInput}
-                onChange={(e) => setMessageInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                placeholder="Send a message to interrupt and replan..."
-                className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm focus:outline-none focus:border-blue-500"
-              />
-              <button
-                onClick={handleSendMessage}
-                disabled={!messageInput.trim()}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded text-sm font-medium transition-colors"
-              >
-                💬 Send
-              </button>
-            </div>
-            <p className="text-xs text-gray-500 mt-1">
-              Send a message to interrupt execution and trigger replanning
-            </p>
-          </div>
-        )}
       </div>
 
       {/* Results Panel - Full Width Below */}
