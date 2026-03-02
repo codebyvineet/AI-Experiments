@@ -8,18 +8,20 @@ This document describes the architecture of the AI Experiments MCP Demo Applicat
 |-----------|------|------------|---------|
 | Frontend | 3000 | React + Vite | User interface |
 | Backend | 8000 | FastAPI | API server, AI orchestration |
-| MCP Server | 8001 | Python + MCP SDK | Tool execution via MCP protocol |
-| MongoDB | 27017 | MongoDB | Hot state storage |
-| Redis | 6379 | Redis | Cold state cache |
+| MCP Server | 8001 | **FastMCP** | Tool execution via MCP protocol |
+| MongoDB | 27017 | MongoDB | Cold state storage (permanent) |
+| Redis | 6379 | Redis | Hot state cache (30-min TTL) |
 
 ### Key Files
 
 | File | Purpose |
 |------|---------|
-| `app/agent/ai_service.py` | Vertex AI integration, plan generation |
-| `app/agent/multi_agent.py` | Plan execution orchestration |
+| `app/agent/graph.py` | **LangGraph** orchestrator with dual checkpointing |
+| `app/agent/checkpointer.py` | Dual checkpointer (Redis hot + MongoDB cold) |
+| `app/mcp/client.py` | Simplified MCP client |
+| `mcp-server/src/server.py` | **FastMCP** tool definitions |
+| `mcp-server/src/app.py` | FastAPI wrapper with JWT auth |
 | `app/auth/authorization.py` | RBAC permission definitions |
-| `mcp-server/src/tools/item_tools.py` | MCP tool implementations |
 | `frontend/src/components/AgentPanel.jsx` | AI agent UI |
 
 ### RBAC Roles
@@ -43,6 +45,27 @@ viewer_demo@test.com / viewer123 → Read only
 ```bash
 docker logs ai-experiments-app-1 | grep "\[AIFLOW\]"
 ```
+
+---
+
+## Framework-Based Architecture
+
+The application uses best-in-class frameworks instead of custom code:
+
+| Component | Framework | Benefit |
+|-----------|-----------|---------|
+| MCP Server | **FastMCP** | 70% code reduction, auto schema generation |
+| AI Orchestration | **LangGraph** | Built-in checkpointing, human-in-the-loop |
+| Checkpointing | **Dual (Redis + MongoDB)** | Fast hot reads + permanent cold storage |
+| State Management | **LangGraph StateGraph** | Automatic persistence, resume support |
+
+### Code Reduction Summary
+
+| Component | Before (Custom) | After (Framework) | Reduction |
+|-----------|-----------------|-------------------|-----------|
+| MCP Server | ~800 lines | ~250 lines | **69%** |
+| MCP Client | ~250 lines | ~180 lines | **28%** |
+| Checkpointing | 0 (MongoDB only) | Dual storage | **+resilience** |
 
 ---
 
@@ -312,27 +335,78 @@ docker logs ai-experiments-app-1 | grep "\[AIFLOW\]"
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                         State Management                                             │
-│                                                                                      │
-│  Hot State (MongoDB):                      Cold State (Redis):                       │
-│  ┌──────────────────────────────┐         ┌──────────────────────────────┐          │
-│  │ • Active sessions            │         │ • Completed sessions          │          │
-│  │ • In-progress plans          │ ──────▶ │ • Archived checkpoints        │          │
-│  │ • Current execution state    │ (after  │ • Historical data             │          │
-│  │ • Real-time updates          │  done)  │ • Session cache               │          │
-│  └──────────────────────────────┘         └──────────────────────────────┘          │
-│                                                                                      │
-│  Checkpoint Structure:                                                               │
-│  {                                                                                   │
-│    "session_id": "uuid",                                                            │
-│    "user_id": "user123",                                                            │
-│    "state_type": "hot|cold",                                                        │
-│    "state_data": { ... plan, tasks, results ... },                                  │
-│    "created_at": "timestamp",                                                       │
-│    "updated_at": "timestamp"                                                        │
-│  }                                                                                   │
+│                       DUAL CHECKPOINTER ARCHITECTURE                                  │
+│                                                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────────────────┐ │
+│  │                         AsyncDualCheckpointer                                    │ │
+│  │                    (app/agent/checkpointer.py)                                   │ │
+│  │                                                                                  │ │
+│  │   Write Strategy: BOTH (parallel writes for reliability)                         │ │
+│  │   Read Strategy: HOT first → fallback to COLD → warm cache                       │ │
+│  └─────────────────────────────────────────────────────────────────────────────────┘ │
+│                                    │                                                  │
+│                ┌───────────────────┴────────────────────┐                            │
+│                ▼                                        ▼                             │
+│  ┌──────────────────────────────────┐  ┌──────────────────────────────────┐          │
+│  │   HOT STORAGE (Redis)            │  │   COLD STORAGE (MongoDB)         │          │
+│  │   langgraph-checkpoint-redis     │  │   langgraph-checkpoint-mongodb   │          │
+│  │                                  │  │                                  │          │
+│  │   • TTL: 30 minutes              │  │   • Permanent storage            │          │
+│  │   • refresh_on_read: true        │  │   • Historical checkpoints       │          │
+│  │   • Latency: ~1ms                │  │   • Latency: ~10ms               │          │
+│  │   • Purpose: Active sessions     │  │   • Purpose: Audit/history       │          │
+│  │   • Auto-expire inactive         │  │   • Never auto-expire            │          │
+│  └──────────────────────────────────┘  └──────────────────────────────────┘          │
+│                                                                                       │
+│  Read Flow:                                                                           │
+│  1. Try Redis (hot) - fast, likely for active sessions                               │
+│  2. If miss → Try MongoDB (cold) - slower but permanent                              │
+│  3. If found in cold → Warm cache (copy to hot)                                      │
+│                                                                                       │
+│  Write Flow:                                                                          │
+│  1. Write to BOTH in parallel using asyncio.gather()                                 │
+│  2. Both must succeed for reliability                                                │
+│                                                                                       │
+│  Benefits:                                                                            │
+│  ✅ Fast reads for active sessions (Redis)                                           │
+│  ✅ Permanent history (MongoDB)                                                       │
+│  ✅ Auto-cleanup of stale sessions (Redis TTL)                                       │
+│  ✅ Session resume after restart (MongoDB fallback)                                  │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Checkpoint Structure
+
+```python
+# LangGraph checkpoint (managed by framework)
+{
+    "thread_id": "session-uuid",
+    "checkpoint_id": "checkpoint-uuid",
+    "channel_values": {
+        "goal": "Create item called Test",
+        "plan": [...],
+        "current_step": 2,
+        "results": [...],
+        "status": "executing"
+    },
+    "channel_versions": {...},
+    "metadata": {
+        "source": "planner_node",
+        "step": 2,
+        "writes": {...}
+    }
+}
+```
+
+### Session Resume Features (LangGraph)
+
+| Feature | API Endpoint | LangGraph Method |
+|---------|--------------|------------------|
+| List sessions | `GET /agent/v2/sessions` | `aget_state()` |
+| Resume session | `GET /agent/v2/sessions/{id}/resume` | `aget_state()` |
+| Re-plan | `POST /agent/v2/sessions/{id}/replan` | `aupdate_state()` |
+| Stop execution | `POST /agent/v2/sessions/{id}/stop` | Update state |
+| Retry session | `POST /agent/v2/sessions/{id}/retry` | `ainvoke(Command(resume=...))` |
 
 ## Docker Deployment
 
@@ -357,9 +431,94 @@ services:
 
 ---
 
-## Current Architecture (MCP-First)
+## Current Architecture (Framework-Based MCP)
 
-The application uses a **MCP-first architecture** where the MCP Server is a separate container that communicates with the Backend API via HTTP with Bearer token authorization.
+The application uses **FastMCP** framework for the MCP Server, dramatically reducing custom code.
+
+### FastMCP Server Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          MCP SERVER (:8001)                                  │
+│                    Powered by FastMCP Framework                              │
+│                                                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                    mcp-server/src/server.py                           │   │
+│  │                                                                       │   │
+│  │  from fastmcp import FastMCP                                          │   │
+│  │  mcp = FastMCP("AI-Experiments MCP Server")                           │   │
+│  │                                                                       │   │
+│  │  @mcp.tool                                                            │   │
+│  │  async def create_item(                                               │   │
+│  │      name: str = Field(..., description="Item name"),                 │   │
+│  │      description: str = Field(None, description="Description")        │   │
+│  │  ) -> dict:                                                           │   │
+│  │      """Create a new item."""  # Auto-generates schema!               │   │
+│  │      return await backend_request("POST", "/items/", ...)             │   │
+│  │                                                                       │   │
+│  │  Benefits:                                                            │   │
+│  │  • @mcp.tool decorator auto-generates JSON schema                     │   │
+│  │  • Field() provides parameter descriptions                            │   │
+│  │  • Docstring becomes tool description                                 │   │
+│  │  • Type hints define parameter types                                  │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                      │                                       │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                    mcp-server/src/app.py                              │   │
+│  │                    FastAPI JWT Authentication Wrapper                  │   │
+│  │                                                                       │   │
+│  │  @app.post("/message")                                                │   │
+│  │  async def message_endpoint(request: Request):                        │   │
+│  │      # 1. Validate JWT token via Backend /auth/me                     │   │
+│  │      # 2. Set token in module-level variable                          │   │
+│  │      # 3. Route JSON-RPC to FastMCP                                   │   │
+│  │      # 4. Return result                                               │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+│  Endpoints:                                                                  │
+│  POST /message  - JSON-RPC 2.0 (tools/list, tools/call)                     │
+│  GET  /health   - Health check                                              │
+│  GET  /tools    - List tools (convenience endpoint)                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Tool Implementation Comparison
+
+**Before (Custom - 50+ lines per tool):**
+```python
+# mcp-server/src/tools/items.py (DELETED)
+def register_item_tools():
+    TOOLS["create_item"] = {
+        "name": "create_item",
+        "description": "Create a new item",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "..."},
+                "description": {"type": "string", "description": "..."},
+                "data": {"type": "object", "description": "..."}
+            },
+            "required": ["name"]
+        }
+    }
+    HANDLERS["create_item"] = create_item_handler
+
+async def create_item_handler(arguments: dict, token: str) -> dict:
+    # ... 30 lines of error handling and HTTP calls
+```
+
+**After (FastMCP - 10 lines per tool):**
+```python
+# mcp-server/src/server.py
+@mcp.tool
+async def create_item(
+    name: str = Field(..., description="Name of the item"),
+    description: str = Field(None, description="Item description"),
+    data: dict = Field(None, description="Additional data")
+) -> dict:
+    """Create a new item in the database."""
+    return await backend_request("POST", "/items/", {"name": name, ...})
+```
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
