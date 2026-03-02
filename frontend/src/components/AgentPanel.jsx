@@ -12,6 +12,9 @@ export default function AgentPanel({ token, user }) {
   const [isStreaming, setIsStreaming] = useState(false);
   const eventsEndRef = useRef(null);
 
+  // Note: Agent is accessible to all users. Authorization happens at tool execution level.
+  // A read_only user can create plans, but write operations will fail with 403 during execution.
+
   useEffect(() => {
     eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [events]);
@@ -176,6 +179,20 @@ export default function AgentPanel({ token, user }) {
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* Left Panel - Controls & Plan */}
       <div className="space-y-4">
+        {/* Role Info Banner */}
+        <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-gray-400">
+              Role: <span className="text-white font-medium">{user?.role}</span>
+            </span>
+            <span className="text-gray-500">
+              {user?.role === 'read_only' 
+                ? '⚠️ Write operations will be denied during execution' 
+                : '✅ Full tool access'}
+            </span>
+          </div>
+        </div>
+
         {/* Goal Input */}
         <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
           <h3 className="font-medium mb-3">🎯 Define Your Goal</h3>
@@ -190,7 +207,7 @@ export default function AgentPanel({ token, user }) {
             <button
               onClick={handleCreateSession}
               disabled={isStreaming || !goal.trim()}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded font-medium transition-colors"
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded font-medium transition-colors"
             >
               {status === 'idle' ? '🚀 Create Plan' : '🔄 New Session'}
             </button>

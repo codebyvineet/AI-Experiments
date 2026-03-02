@@ -8,6 +8,11 @@ export default function ItemsPanel({ token, user }) {
   const [editingItem, setEditingItem] = useState(null);
   const [formData, setFormData] = useState({ name: '', description: '', data: '' });
 
+  // Permission checks based on user's actual permissions from the token
+  const canWrite = user?.permissions?.includes('items:write') ?? false;
+  const canDelete = user?.permissions?.includes('items:delete') ?? false;
+  const canRead = user?.permissions?.includes('items:read') ?? true;
+
   const loadItems = async () => {
     setLoading(true);
     try {
@@ -76,6 +81,10 @@ export default function ItemsPanel({ token, user }) {
   };
 
   const handleDelete = async (itemId) => {
+    if (!canDelete) {
+      alert('Permission denied: You do not have items:delete permission');
+      return;
+    }
     if (!confirm('Are you sure you want to delete this item?')) return;
     try {
       await api.deleteItem(token, itemId);
@@ -86,6 +95,10 @@ export default function ItemsPanel({ token, user }) {
   };
 
   const startEdit = (item) => {
+    if (!canWrite) {
+      alert('Permission denied: You do not have items:write permission');
+      return;
+    }
     setEditingItem(item);
     setFormData({
       name: item.name,
@@ -95,10 +108,42 @@ export default function ItemsPanel({ token, user }) {
     setShowForm(false);
   };
 
-  const canWrite = ['admin', 'user'].includes(user.role);
+  // Role badge colors
+  const getRoleBadge = (role) => {
+    const styles = {
+      admin: 'bg-purple-600 text-purple-100',
+      user: 'bg-blue-600 text-blue-100',
+      read_only: 'bg-gray-600 text-gray-100'
+    };
+    return styles[role] || styles.read_only;
+  };
 
   return (
     <div className="space-y-6">
+      {/* Permissions Banner */}
+      <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="text-gray-400">Logged in as:</span>
+            <span className="font-medium text-white">{user?.username}</span>
+            <span className={`px-2 py-1 rounded text-xs font-medium ${getRoleBadge(user?.role)}`}>
+              {user?.role?.toUpperCase()}
+            </span>
+          </div>
+          <div className="flex gap-2 text-xs">
+            <span className={`px-2 py-1 rounded ${canRead ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+              {canRead ? '✅' : '❌'} Read
+            </span>
+            <span className={`px-2 py-1 rounded ${canWrite ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+              {canWrite ? '✅' : '❌'} Write
+            </span>
+            <span className={`px-2 py-1 rounded ${canDelete ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+              {canDelete ? '✅' : '❌'} Delete
+            </span>
+          </div>
+        </div>
+      </div>
+
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>
@@ -210,20 +255,24 @@ export default function ItemsPanel({ token, user }) {
                       </div>
                     )}
                   </div>
-                  {canWrite && (
+                  {(canWrite || canDelete) && (
                     <div className="flex gap-2 ml-4">
-                      <button
-                        onClick={() => startEdit(item)}
-                        className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm transition-colors"
-                      >
-                        ✏️ Edit
-                      </button>
-                      <button
-                        onClick={() => handleDelete(item.id)}
-                        className="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-sm transition-colors"
-                      >
-                        🗑️ Delete
-                      </button>
+                      {canWrite && (
+                        <button
+                          onClick={() => startEdit(item)}
+                          className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm transition-colors"
+                        >
+                          ✏️ Edit
+                        </button>
+                      )}
+                      {canDelete && (
+                        <button
+                          onClick={() => handleDelete(item.id)}
+                          className="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-sm transition-colors"
+                        >
+                          🗑️ Delete
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>

@@ -203,17 +203,42 @@ npm run dev
    - Real AI executes each task
 8. See the summary when complete
 
-### Test 5: Different User Roles (RBAC)
+### Test 5: Different User Roles (RBAC Demo)
+
+We provide a script to create demo users with different permission levels:
+
 ```bash
-# Create a read-only user via CLI
-curl -X POST http://localhost:8000/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username": "readonly", "password": "readonly123", "email": "ro@test.com", "role": "read_only"}'
+# Create demo users (from project root)
+./scripts/create_demo_users.sh
 ```
 
-Log in as `readonly` user in the UI:
-- Items CRUD: Can only view, create/edit/delete buttons disabled
-- MCP Server: Only read tools available (2 instead of 5)
+This creates 3 users:
+
+| Username | Password | Role | Permissions |
+|----------|----------|------|-------------|
+| `admin_demo` | `admin123` | admin | Full access to all features |
+| `user_demo` | `user123` | user | CRUD items, execute agent |
+| `viewer_demo` | `viewer123` | read_only | Read only (403 on write operations) |
+
+#### Testing RBAC:
+
+1. **Login as `viewer_demo`** (read-only):
+   - **Items CRUD**: "New Item", "Edit", "Delete" buttons are hidden
+   - **AI Agent**: Shows "🔒 Agent Access Denied" banner, input disabled
+   - **API calls**: `POST /items/` returns `403 Permission denied: requires 'items:write'`
+
+2. **Login as `user_demo`** (normal user):
+   - **Items CRUD**: Can create, edit, delete items ✅
+   - **AI Agent**: Can execute plans ✅
+   - **Admin features**: Not available (no `users:*` permissions)
+
+3. **Login as `admin_demo`** (full access):
+   - All features available ✅
+
+The UI shows a permissions banner indicating your current access level:
+```
+Logged in as: viewer_demo [READ_ONLY]  ✅ Read  ❌ Write  ❌ Delete
+```
 
 ---
 
