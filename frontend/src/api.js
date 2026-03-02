@@ -111,6 +111,14 @@ export const api = {
     return data.sessions || [];
   },
 
+  async deleteSession(token, sessionId) {
+    const res = await fetch(`${API_BASE}/stream/sessions/${sessionId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    return res.json();
+  },
+
   async stopSession(token, sessionId) {
     const res = await fetch(`${API_BASE}/stream/sessions/${sessionId}/stop`, {
       method: 'POST',

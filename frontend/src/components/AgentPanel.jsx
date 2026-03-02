@@ -282,6 +282,25 @@ export default function AgentPanel({ token, user }) {
     }
   };
 
+  // Cancel/delete a stuck session
+  const handleCancelSession = async (sid) => {
+    if (!confirm('Cancel this session? This cannot be undone.')) return;
+    
+    try {
+      await api.deleteSession(token, sid);
+      addEvent({ type: 'status', message: `Session ${sid.slice(0, 8)} cancelled` });
+      
+      // If we cancelled the current session, clear state
+      if (sid === sessionId) {
+        handleNewSession();
+      }
+      
+      refreshSessions();
+    } catch (err) {
+      addEvent({ type: 'error', error: `Failed to cancel session: ${err.message}` });
+    }
+  };
+
   const getEventIcon = (type) => {
     const icons = {
       user_action: '👤',
@@ -368,17 +387,31 @@ export default function AgentPanel({ token, user }) {
               previousSessions.map((s) => (
                 <div 
                   key={s.session_id}
-                  onClick={() => restoreSession(s.session_id)}
-                  className={`flex items-center justify-between p-2 rounded cursor-pointer text-xs transition-colors
+                  className={`flex items-center justify-between p-2 rounded text-xs transition-colors
                     ${sessionId === s.session_id ? 'bg-blue-900/50 border border-blue-600' : 'bg-gray-700/50 hover:bg-gray-700'}`}
                 >
-                  <div className="flex-1 truncate">
+                  <div 
+                    className="flex-1 truncate cursor-pointer"
+                    onClick={() => restoreSession(s.session_id)}
+                  >
                     <span className="text-gray-400 mr-2 font-mono">{s.session_id.slice(0, 8)}</span>
-                    <span className="text-gray-300">{s.goal?.slice(0, 25) || 'No goal'}</span>
+                    <span className="text-gray-300">{s.goal?.slice(0, 20) || 'No goal'}</span>
                   </div>
-                  <span className={`px-2 py-0.5 rounded text-xs ml-2 text-white ${getStatusColor(s.status)}`}>
-                    {s.status === 'awaiting_approval' ? 'ready' : s.status}
-                  </span>
+                  <div className="flex items-center gap-1">
+                    <span className={`px-2 py-0.5 rounded text-xs text-white ${getStatusColor(s.status)}`}>
+                      {s.status === 'awaiting_approval' ? 'ready' : s.status}
+                    </span>
+                    {/* Cancel button for stuck executing sessions */}
+                    {s.status === 'executing' && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleCancelSession(s.session_id); }}
+                        className="px-1 py-0.5 text-red-400 hover:text-red-300 hover:bg-red-900/30 rounded"
+                        title="Cancel stuck session"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
                 </div>
               ))
             )}

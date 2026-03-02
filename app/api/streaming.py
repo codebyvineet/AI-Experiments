@@ -343,6 +343,51 @@ async def resume_session(
     return resume_info
 
 
+@router.delete("/sessions/{session_id}")
+async def delete_session(
+    session_id: str,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Delete/cancel a session.
+    
+    Useful for cleaning up stuck or unwanted sessions.
+    """
+    request_id = str(uuid.uuid4())[:8]
+    log = LogContext(logger, request_id=request_id, session_id=session_id, user_id=current_user.user_id)
+    
+    log.info("📥 Request: Delete session")
+    
+    orchestrator = await get_orchestrator()
+    
+    # Verify ownership
+    state = await orchestrator.get_session_state(session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if state.get("user_id") != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Mark as cancelled in the state
+    # We use aupdate_state with the "summary" node which leads to END
+    # This marks the session as complete/cancelled
+    config = {"configurable": {"thread_id": session_id}}
+    try:
+        await orchestrator._graph.aupdate_state(
+            config,
+            {"status": "cancelled", "final_result": "Session cancelled by user"},
+            as_node="summary"
+        )
+    except Exception as e:
+        # If update fails (e.g., graph structure doesn't allow it),
+        # just log it - the session is effectively abandoned
+        log.warning(f"Could not update state (session may be orphaned): {e}")
+    
+    log.info("📤 Response: Session deleted/cancelled")
+    
+    return {"message": "Session cancelled", "session_id": session_id}
+
+
 class MessageRequest(BaseModel):
     content: str
 
