@@ -21,15 +21,39 @@ export const api = {
   },
 
   async getMe(token) {
-    const res = await fetch(`${API_BASE}/auth/me`, {
-      headers: { 'Authorization': `Bearer ${token}` }
-    });
-    const data = await res.json();
-    return {
-      ...data,
-      id: data.user_id || data.id,
-      role: data.role || 'user'
-    };
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+    
+    try {
+      const res = await fetch(`${API_BASE}/auth/me`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      
+      if (res.status === 401 || res.status === 403) {
+        const error = new Error('Unauthorized');
+        error.isAuthError = true;
+        throw error;
+      }
+      
+      const data = await res.json();
+      return {
+        ...data,
+        id: data.user_id || data.id,
+        role: data.role || 'user'
+      };
+    } catch (err) {
+      clearTimeout(timeoutId);
+      // Only mark as auth error if it's an actual auth failure
+      if (err.isAuthError) {
+        throw err;
+      }
+      // For timeouts/network errors, throw a different error
+      const error = new Error(err.name === 'AbortError' ? 'Request timeout' : err.message);
+      error.isNetworkError = true;
+      throw error;
+    }
   },
 
   // Health

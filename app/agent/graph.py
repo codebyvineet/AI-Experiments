@@ -235,16 +235,52 @@ class LangGraphOrchestrator:
                             yield {"type": "plan_step", "step_number": i + 1, "step": step}
                         yield {"type": "plan_complete", "plan": plan, "total_steps": len(plan)}
                     
+                    elif node_name == "executor_dispatch":
+                        # Step is being executed - emit step info
+                        current_step = output.get("current_step", 0)
+                        plan = output.get("plan", [])
+                        total_steps = len(plan) if plan else 0
+                        if current_step < total_steps:
+                            step = plan[current_step]
+                            yield {
+                                "type": "step_start",
+                                "step_number": current_step + 1,
+                                "total_steps": total_steps,
+                                "step_description": step.get("description", ""),
+                                "step_phase": step.get("phase", ""),
+                                "sub_tasks": [t.get("tool") for t in step.get("sub_tasks", [])],
+                                "message": f"Executing step {current_step + 1} of {total_steps}: {step.get('description', '')}"
+                            }
+                    
                     elif node_name == "task_executor":
-                        # Task completed
+                        # Task completed - emit result with task details
                         results = output.get("results", [])
                         if results:
                             latest = results[-1] if isinstance(results, list) else results
+                            task_name = latest.get("task_name", "Task")
+                            task_result = latest.get("result", {})
+                            task_status = latest.get("status", "completed")
                             yield {
                                 "type": "task_complete",
-                                "task_name": latest.get("task_name", "Task"),
-                                "result": latest.get("result", {}),
-                                "message": f"Completed: {latest.get('task_name', 'Task')}"
+                                "task_name": task_name,
+                                "status": task_status,
+                                "result": task_result,
+                                "message": f"{'✓' if task_status == 'success' else '✗'} {task_name}: {task_result.get('summary', task_result.get('message', ''))[:100]}"
+                            }
+                    
+                    elif node_name == "aggregator":
+                        # Step aggregation complete
+                        current_step = output.get("current_step", 0)
+                        total_steps = len(output.get("plan", []))
+                        step_results = output.get("step_results", [])
+                        if step_results:
+                            latest_step = step_results[-1] if isinstance(step_results, list) else step_results
+                            yield {
+                                "type": "step_complete",
+                                "step_number": current_step,
+                                "total_steps": total_steps,
+                                "step_status": latest_step.get("status", "completed"),
+                                "message": f"Step {current_step} of {total_steps} completed"
                             }
                     
                     elif node_name == "summary":

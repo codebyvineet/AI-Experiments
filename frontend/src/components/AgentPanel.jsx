@@ -93,17 +93,28 @@ export default function AgentPanel({ token, user }) {
               } else if (data.type === 'plan_complete') {
                 setPlan(data.plan);
                 setStatus('planned');
+              } else if (data.type === 'step_start') {
+                // Mark current step as running
+                setPlan(prev => prev.map((s, i) => ({
+                  ...s,
+                  status: i === data.step_number - 1 ? 'running' : 
+                          i < data.step_number - 1 ? 'completed' : 'pending'
+                })));
               } else if (data.type === 'step_complete') {
                 setPlan(prev => prev.map((s, i) => 
-                  i === data.step_index ? { ...s, status: 'completed' } : s
+                  i === data.step_number - 1 ? { ...s, status: 'completed' } : s
                 ));
-              } else if (data.type === 'task_complete' && data.result) {
-                const taskName = data.task?.name || data.task_name || data.message || 'Task';
-                setResults(prev => [...prev, {
-                  task: taskName,
-                  result: data.result,
-                  timestamp: new Date().toISOString()
-                }]);
+              } else if (data.type === 'task_complete') {
+                const taskName = data.task_name || data.message || 'Task';
+                const taskStatus = data.status || 'completed';
+                if (data.result) {
+                  setResults(prev => [...prev, {
+                    task: taskName,
+                    status: taskStatus,
+                    result: data.result,
+                    timestamp: new Date().toISOString()
+                  }]);
+                }
               } else if (data.type === 'execution_stopped') {
                 setStatus('stopped');
                 setFinalSummary(`⚠️ Execution Stopped\n\nReason: ${data.reason || 'unknown'}\n${data.message || ''}`);

@@ -9,17 +9,31 @@ import ItemsPanel from './components/ItemsPanel';
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token') || '');
   const [user, setUser] = useState(null);
+  const [isLoading, setIsLoading] = useState(!!localStorage.getItem('token')); // Loading if token exists
   const [activeTab, setActiveTab] = useState('dashboard');
   const [health, setHealth] = useState(null);
 
   useEffect(() => {
     if (token) {
+      setIsLoading(true);
       api.getMe(token)
-        .then(setUser)
-        .catch(() => {
-          setToken('');
-          localStorage.removeItem('token');
+        .then(userData => {
+          setUser(userData);
+          setIsLoading(false);
+        })
+        .catch((err) => {
+          // Only clear token on actual auth errors, not network/timeout errors
+          if (err.isAuthError) {
+            setToken('');
+            localStorage.removeItem('token');
+          } else {
+            // Network error - keep trying
+            console.warn('Network error verifying token:', err.message);
+          }
+          setIsLoading(false);
         });
+    } else {
+      setIsLoading(false);
     }
   }, [token]);
 
@@ -42,6 +56,17 @@ function App() {
     setUser(null);
     localStorage.removeItem('token');
   };
+
+  // Show loading state while verifying token
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+        <div className="text-gray-400 text-lg">
+          <span className="animate-pulse">Loading...</span>
+        </div>
+      </div>
+    );
+  }
 
   if (!token || !user) {
     return <Login onLogin={handleLogin} />;
