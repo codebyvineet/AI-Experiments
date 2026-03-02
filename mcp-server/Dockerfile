@@ -13,4 +13,5 @@ ENV BACKEND_URL=http://app:8000
 
 EXPOSE 8001
 
-CMD ["python", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8001"]
+# Use the new FastMCP-based app
+CMD ["python", "-m", "uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8001"]

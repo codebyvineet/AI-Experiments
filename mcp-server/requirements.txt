@@ -1,8 +1,17 @@
+# FastMCP framework (replaces custom MCP implementation)
+fastmcp>=2.0.0
+
+# FastAPI for HTTP wrapper
 fastapi>=0.115.0
 uvicorn>=0.30.0
+
+# HTTP client for Backend API calls
 httpx>=0.27.0
+
+# SSE support (for streamable transport)
 sse-starlette>=2.0.0
+
+# Settings management
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
-motor>=3.3.0
