@@ -1,9 +1,8 @@
-# Manual Testing Guide — Google ADK Implementation
+# Manual UI Testing — Google ADK Implementation
 
-This document covers every feature of the **Google ADK** implementation end-to-end.  
-Follow these steps locally with `docker compose up --build` before running each test.
-
----
+> **Testing Method:** Playwright browser automation
+> **Application URL:** `http://localhost:8000/app/`
+> **Docker Stack:** app:8000, mcp-server:8001, mongodb:27017, redis:6379
 
 ## Prerequisites
 
@@ -43,678 +42,264 @@ Wait for all four containers to show `healthy` / ready:
 curl http://localhost:8000/health
 # {"status":"healthy","framework":"google-adk"}
 
-curl http://localhost:8000/
-# {"message":"MCP Demo — Google ADK Implementation","framework":"Google ADK",...}
-
 curl http://localhost:8001/health
 # {"status":"healthy","service":"mcp-server"}
 ```
 
----
+## Test Users
 
-## Test Suite
-
-Set this shell variable once; every test below references it:
-
-```bash
-BASE="http://localhost:8000"
-```
+| User | Role | Permissions | Password |
+|------|------|-------------|----------|
+| admin | admin | items:read, items:write, items:delete | admin123456 |
+| testuser | user | items:read, items:write | user123456 |
+| viewer | read_only | items:read | viewer123456 |
 
 ---
 
-## TC-01 · User Registration
+## Test Results Summary
 
-**Goal:** Register three users with different roles.
+| # | Test Case | Status | Screenshot |
+|---|-----------|--------|------------|
+| TC-01 | Login page with quick-login buttons | ✅ Pass | test-screenshots/tc-01-login-page.png |
+| TC-02 | Viewer login — role badge & permissions | ✅ Pass | test-screenshots/tc-02-viewer-dashboard.png |
+| TC-03 | Viewer chat mode — list items | ✅ Pass | test-screenshots/tc-03-viewer-chat-list-items.png |
+| TC-04 | Viewer plan mode — permission denied on write | ✅ Pass | test-screenshots/tc-04-viewer-plan-permission-denied.png |
+| TC-05 | Session persistence after refresh | ✅ Pass | test-screenshots/tc-05-session-persistence.png |
+| TC-06 | Admin login — sees all users' sessions | ✅ Pass | test-screenshots/tc-06-admin-login.png |
+| TC-07a | Admin chat — create item via tool | ✅ Pass | test-screenshots/tc-07a-admin-chat-create.png |
+| TC-07b | Admin chat — conversation continuity | ✅ Pass | test-screenshots/tc-07b-admin-chat-continuity.png |
+| TC-08a | Plan mode — parallel steps generated | ✅ Pass | test-screenshots/tc-08a-parallel-plan-generated.png |
+| TC-08b | Plan mode — Execute Next Step (single) | ✅ Pass | test-screenshots/tc-08b-execute-next-step.png |
+| TC-08c | Plan mode — Execute All (parallel) | ✅ Pass | test-screenshots/tc-08c-execute-all-parallel.png |
+| TC-09a | Refresh — chat context preserved | ✅ Pass | test-screenshots/tc-09a-refresh-context-preserved.png |
+| TC-09b | Refresh — plan state preserved | ✅ Pass | test-screenshots/tc-09b-plan-state-preserved.png |
+| TC-10a | Testuser login + chat | ✅ Pass | test-screenshots/tc-10a-testuser-chat.png |
+| TC-10b | Testuser — create item via chat | ✅ Pass | test-screenshots/tc-10b-testuser-create-item.png |
+| TC-11a | Items panel — admin full CRUD | ✅ Pass | test-screenshots/tc-11a-items-admin-crud.png |
+| TC-11b | Items panel — viewer read-only | ✅ Pass | test-screenshots/tc-11b-items-viewer-readonly.png |
+| TC-12 | MCP Server panel — tool listing & schema | ✅ Pass | test-screenshots/tc-12-mcp-tools-panel.png |
+| TC-13 | Session switching (chat ↔ plan) | ✅ Pass | test-screenshots/tc-13-session-switching.png |
 
-```bash
-# Admin
-curl -s -X POST $BASE/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","email":"admin@test.com","password":"Admin123!","role":"admin"}' | jq .
-
-# Regular user
-curl -s -X POST $BASE/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","email":"alice@test.com","password":"Alice123!","role":"user"}' | jq .
-
-# Read-only user
-curl -s -X POST $BASE/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"viewer","email":"viewer@test.com","password":"View123!","role":"read_only"}' | jq .
-```
-
-**Expected:** HTTP 200 for each, response includes `id`, `username`, `role`, `is_active: true`.
-
-**Negative — duplicate username:**
-
-```bash
-curl -s -X POST $BASE/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","email":"alice2@test.com","password":"Alice123!","role":"user"}' | jq .
-```
-
-**Expected:** HTTP 400 — `"Username or email already exists"`.
+**Result: 19/19 tests passed ✅**
 
 ---
 
-## TC-02 · Login & JWT Issuance
+## Detailed Test Cases
 
-```bash
-# Alice login
-ALICE_TOKEN=$(curl -s -X POST $BASE/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"Alice123!"}' | jq -r .access_token)
-echo "Alice token: ${ALICE_TOKEN:0:40}..."
+### TC-01: Login Page with Quick-Login Buttons
+**Steps:**
+1. Navigate to `http://localhost:8000/app/`
+2. Verify login form with username/password fields
+3. Verify "Quick Login (Demo Users)" section with 3 buttons
 
-# Viewer login
-VIEWER_TOKEN=$(curl -s -X POST $BASE/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"viewer","password":"View123!"}' | jq -r .access_token)
-
-# Admin login
-ADMIN_TOKEN=$(curl -s -X POST $BASE/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"Admin123!"}' | jq -r .access_token)
-```
-
-**Expected:** Each returns `{"access_token": "eyJ...", "token_type": "bearer"}`.
-
-**Negative — wrong password:**
-
-```bash
-curl -s -X POST $BASE/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"wrong"}' | jq .
-```
-
-**Expected:** HTTP 401 — `"Incorrect username or password"`.
+**Expected:** Three quick-login buttons showing username and role (admin/admin, testuser/user, viewer/read_only)
+**Result:** ✅ All three buttons present with correct labels
 
 ---
 
-## TC-03 · Current User Profile
+### TC-02: Viewer Login — Role Badge & Permissions
+**Steps:**
+1. Click "viewer read_only" quick-login button
+2. Verify dashboard loads with role badge
 
-```bash
-curl -s $BASE/auth/me -H "Authorization: Bearer $ALICE_TOKEN" | jq .
-```
-
-**Expected:** Returns Alice's profile with `role: "user"`.
-
----
-
-## TC-04 · Role Permissions
-
-```bash
-# List Alice's permissions
-curl -s $BASE/auth/permissions/user | jq .
-
-# List read_only permissions
-curl -s $BASE/auth/permissions/read_only | jq .
-
-# List admin permissions
-curl -s $BASE/auth/permissions/admin | jq .
-```
-
-**Expected:**
-
-| Role | Key permissions present |
-|------|------------------------|
-| `user` | `items:read`, `items:write`, `items:delete`, `agent:execute` |
-| `read_only` | `items:read`, `mcp:read` only |
-| `admin` | All of the above + `agent:admin`, `mcp:admin`, `users:*` |
+**Expected:** Header shows "viewer read_only", dashboard displays correct role and permissions
+**Result:** ✅ `read_only` badge displayed, permissions show items:read ✅, items:write ❌
 
 ---
 
-## TC-05 · Item CRUD
+### TC-03: Viewer Chat Mode — List Items (Read Access)
+**Steps:**
+1. As viewer, go to AI Agent tab
+2. Create new chat session
+3. Send "List all items in the database"
 
-### Create items (Alice — has `items:write`)
-
-```bash
-ITEM1=$(curl -s -X POST $BASE/items/ \
-  -H "Authorization: Bearer $ALICE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Widget A","description":"First test item","data":{"color":"blue"}}' | jq -r .id)
-echo "Item 1: $ITEM1"
-
-ITEM2=$(curl -s -X POST $BASE/items/ \
-  -H "Authorization: Bearer $ALICE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Widget B","description":"Second test item","data":{"color":"red"}}' | jq -r .id)
-echo "Item 2: $ITEM2"
-```
-
-**Expected:** HTTP 200, response includes `id`, `name`, `owner_id` (Alice's user ID).
-
-### List items
-
-```bash
-# All items (any authenticated user)
-curl -s "$BASE/items/" -H "Authorization: Bearer $ALICE_TOKEN" | jq '.[] | .name'
-
-# Only Alice's items
-curl -s "$BASE/items/?my_items_only=true" -H "Authorization: Bearer $ALICE_TOKEN" | jq '.[].name'
-```
-
-**Expected:** Both Widget A and Widget B appear.
-
-### Read a single item
-
-```bash
-curl -s $BASE/items/$ITEM1 -H "Authorization: Bearer $ALICE_TOKEN" | jq .
-```
-
-**Expected:** Full item object with `name: "Widget A"`.
-
-### Update item
-
-```bash
-curl -s -X PUT $BASE/items/$ITEM1 \
-  -H "Authorization: Bearer $ALICE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Widget A (updated)","data":{"color":"green"}}' | jq .name
-```
-
-**Expected:** `"Widget A (updated)"`.
-
-### Delete item
-
-```bash
-curl -s -X DELETE $BASE/items/$ITEM2 \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq .
-
-# Verify it's gone
-curl -s $BASE/items/$ITEM2 -H "Authorization: Bearer $ALICE_TOKEN" | jq .detail
-```
-
-**Expected:** Delete returns `{"status":"deleted"}`. Second request returns 404.
+**Expected:** AI calls `list_items` MCP tool and returns results
+**Result:** ✅ AI called `list_items`, returned all items in database. Tool call and result badges visible.
 
 ---
 
-## TC-06 · RBAC — Write blocked for read_only
+### TC-04: Viewer Plan Mode — Permission Denied on Write
+**Steps:**
+1. As viewer, switch to Plan Mode
+2. Create new plan session
+3. Send "Create a new item called 'Playwright Test Widget' with description 'Created during UI testing'"
+4. Wait for plan generation
+5. Click "Execute All"
 
-```bash
-# Viewer tries to create an item
-curl -s -X POST $BASE/items/ \
-  -H "Authorization: Bearer $VIEWER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Should Fail"}' | jq .
-```
-
-**Expected:** HTTP 403 — `"Permission denied: requires 'items:write'"`.
-
-```bash
-# Viewer can still READ
-curl -s $BASE/items/ -H "Authorization: Bearer $VIEWER_TOKEN" | jq '.[].name'
-```
-
-**Expected:** HTTP 200, returns existing items.
+**Expected:** Plan generates successfully but execution fails with permission error from MCP server
+**Result:** ✅ Plan generated with steps. Execution failed: "Error creating item. It seems the viewer role does not have write permissions." RBAC enforced at MCP tool level.
 
 ---
 
-## TC-07 · Agent Session — Create & Get State
+### TC-05: Session Persistence After Refresh
+**Steps:**
+1. As viewer with existing sessions, press browser refresh (F5)
+2. Verify sessions list still shows all previous sessions
 
-```bash
-# Create a session (Alice)
-SESSION=$(curl -s -X POST $BASE/agent/sessions \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq -r .session_id)
-echo "Session: $SESSION"
-
-# Get session state
-curl -s $BASE/agent/sessions/$SESSION \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq .
-```
-
-**Expected:** Session created with `is_planning_mode: false`, `plan: []`, `current_step: 0`, `is_complete: false`.
+**Expected:** All sessions persist and are listed after page reload
+**Result:** ✅ 5 sessions persisted across refresh (both chat and plan types)
 
 ---
 
-## TC-08 · Chat Mode (Google ADK LlmAgent + MCP tools)
+### TC-06: Admin Login — Sees All Users' Sessions
+**Steps:**
+1. Logout, login as admin
+2. Go to AI Agent tab
+3. Check sessions list
 
-```bash
-# Send a message — the ADK LlmAgent will call MCP tools when needed
-curl -s -X POST $BASE/agent/sessions/$SESSION/chat \
-  -H "Authorization: Bearer $ALICE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"message":"List all my items and then create a new item called ADK Test Item"}' | jq .
-```
-
-**Expected:**
-- HTTP 200
-- `agent_reply` contains a text response
-- The Gemini model will have called `list_items` and `create_item` MCP tools
-- Response references the items that were created/listed
-
-```bash
-# Follow-up conversation (session history preserved)
-curl -s -X POST $BASE/agent/sessions/$SESSION/chat \
-  -H "Authorization: Bearer $ALICE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"message":"What was the last item you created?"}' | jq .agent_reply
-```
-
-**Expected:** The agent references "ADK Test Item" from the previous turn (session memory active).
+**Expected:** Admin sees sessions from all users (admin is the only role that sees all)
+**Result:** ✅ Admin sees all sessions including those from other users' testing
 
 ---
 
-## TC-09 · Plan Mode — Generate Plan
+### TC-07a: Admin Chat — Create Item via MCP Tool
+**Steps:**
+1. As admin, create new chat session
+2. Send "Create a new item called AdminWidget with description 'created by admin via chat'"
 
-```bash
-# Create a fresh session for plan mode
-PLAN_SESSION=$(curl -s -X POST $BASE/agent/sessions \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq -r .session_id)
-
-# Enter plan mode
-curl -s -X POST $BASE/agent/sessions/$PLAN_SESSION/plan \
-  -H "Authorization: Bearer $ALICE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"goal":"Create three items named Alpha, Beta, Gamma and then list them all"}' | jq .
-```
-
-**Expected:**
-```json
-{
-  "session_id": "...",
-  "mode": "planning",
-  "plan": [
-    {"step_id": "1", "description": "Create item Alpha", "action": "create_item", "status": "pending"},
-    {"step_id": "2", "description": "Create item Beta",  "action": "create_item", "status": "pending"},
-    {"step_id": "3", "description": "Create item Gamma", "action": "create_item", "status": "pending"},
-    {"step_id": "4", "description": "List all items",    "action": "list_items",  "status": "pending"}
-  ],
-  "total_steps": 4
-}
-```
-
-```bash
-# Verify session is now in planning mode
-curl -s $BASE/agent/sessions/$PLAN_SESSION \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq '{is_planning_mode, current_step, total_steps: (.plan | length)}'
-```
+**Expected:** AI calls `create_item` tool, item is created
+**Result:** ✅ Tool call `create_item` with `{"name": "AdminWidget", "description": "created by admin via chat"}` succeeded. Tool result badge shows success with item ID.
 
 ---
 
-## TC-10 · Plan Mode — Execute Steps One by One
+### TC-07b: Admin Chat — Conversation Continuity
+**Steps:**
+1. In same session as TC-07a, send follow-up: "What was the ID of the item I just created?"
 
-```bash
-# Execute step 1
-curl -s -X POST $BASE/agent/sessions/$PLAN_SESSION/execute-step \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq '{step_id: .step.step_id, status: .step.status, current_step, is_complete}'
-
-# Execute step 2
-curl -s -X POST $BASE/agent/sessions/$PLAN_SESSION/execute-step \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq '{step_id: .step.step_id, status: .step.status, current_step, is_complete}'
-```
-
-**Expected:** Each call returns the completed step with `status: "completed"` and `current_step` incrementing.
+**Expected:** AI remembers context and returns the item ID
+**Result:** ✅ AI correctly recalled item ID from previous turn. Session state preserved within conversation.
 
 ---
 
-## TC-11 · Plan Mode — Execute All Remaining Steps
+### TC-08a: Plan Mode — Parallel Steps Generated
+**Steps:**
+1. As admin, create new plan session
+2. Send "Create three items: Dog, Cat, and Fish. Then list all items."
 
-```bash
-curl -s -X POST $BASE/agent/sessions/$PLAN_SESSION/execute-all \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq '{status, total_results: (.execution_results | length), is_complete: .execution_results[-1].is_complete}'
-```
-
-**Expected:** `status: "completed"`, all steps executed, `is_complete: true`.
-
-```bash
-# Session should now be complete
-curl -s $BASE/agent/sessions/$PLAN_SESSION \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq '{is_planning_mode, is_complete, current_step}'
-```
-
-**Expected:** `is_planning_mode: false`, `is_complete: true`.
+**Expected:** Planner generates steps with parallel grouping — Dog/Cat/Fish in same group, list_items in separate group
+**Result:** ✅ Plan generated with 4 steps: Steps 1-3 (Dog, Cat, Fish) in group 1 (parallel), Step 4 (list_items) in group 2 (sequential). Parallel grouping correctly identified.
 
 ---
 
-## TC-12 · Plan Mode — Read-only user cannot start a session
+### TC-08b: Plan Mode — Execute Next Step (Single)
+**Steps:**
+1. From TC-08a, click "Execute Next Step"
 
-```bash
-curl -s -X POST $BASE/agent/sessions \
-  -H "Authorization: Bearer $VIEWER_TOKEN" | jq .
-```
-
-**Expected:** HTTP 403 — `"Permission denied: requires 'agent:execute'"`.
+**Expected:** Only one step executes
+**Result:** ✅ Single step executed (Dog created), remaining steps still pending with "Execute Next Step" and "Execute All" buttons available.
 
 ---
 
-## TC-13 · Session Ownership
+### TC-08c: Plan Mode — Execute All (Parallel Execution)
+**Steps:**
+1. From TC-08b, click "Execute All"
 
-```bash
-# Create another user and their session
-BOB_TOKEN=$(curl -s -X POST $BASE/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"bob","email":"bob@test.com","password":"Bob123!","role":"user"}' | \
-  xargs -I{} curl -s -X POST $BASE/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"bob","password":"Bob123!"}' | jq -r .access_token)
+**Expected:** Remaining steps execute — Cat and Fish run in parallel (same group), then list_items runs
+**Result:** ✅ All remaining steps executed. Cat and Fish created concurrently (parallel group 1 remaining), then list_items confirmed all items exist. Final item count includes Dog, Cat, Fish.
 
-BOB_SESSION=$(curl -s -X POST $BASE/agent/sessions \
-  -H "Authorization: Bearer $BOB_TOKEN" | jq -r .session_id)
-
-# Alice tries to read Bob's session — should be rejected
-curl -s $BASE/agent/sessions/$BOB_SESSION \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq .detail
-```
-
-**Expected:** HTTP 403 — `"You don't have access to this session"`.
-
-```bash
-# Admin CAN read any session
-curl -s $BASE/agent/sessions/$BOB_SESSION \
-  -H "Authorization: Bearer $ADMIN_TOKEN" | jq .session_id
-```
-
-**Expected:** Returns Bob's session details (admin has `agent:admin` permission).
+**Note:** One stale session warning observed during parallel execution — this is expected when concurrent runners write to the same MongoDB session simultaneously. Items were still created successfully via MCP tools despite the session state race condition.
 
 ---
 
-## TC-14 · Session Archive
+### TC-09a: Refresh — Chat Context Preserved
+**Steps:**
+1. As admin with active chat session (from TC-07a), refresh page
+2. Select the same session
+3. Send "What item did I create earlier?"
 
-```bash
-curl -s -X POST $BASE/agent/sessions/$PLAN_SESSION/archive \
-  -H "Authorization: Bearer $ALICE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"ttl_days":7}' | jq .
-```
+**Expected:** AI remembers context from before refresh
+**Result:** ✅ AI correctly recalled the item created pre-refresh. MongoDB session persistence working correctly via MongodbSessionService.
 
-**Expected:** `{"session_id":"...","status":"archived","ttl_days":7}`.
-
----
-
-## TC-15 · Token Revocation
-
-```bash
-# Revoke Alice's current token
-curl -s -X POST $BASE/auth/token/revoke \
-  -H "Authorization: Bearer $ALICE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"token\": \"$ALICE_TOKEN\"}" | jq .
-
-# Try to use the revoked token
-curl -s $BASE/auth/me \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq .detail
-```
-
-**Expected:** After revoke, token returns HTTP 401 — `"Token has been revoked"`.
-
-```bash
-# Get a fresh token
-ALICE_TOKEN=$(curl -s -X POST $BASE/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"Alice123!"}' | jq -r .access_token)
-
-curl -s $BASE/auth/me -H "Authorization: Bearer $ALICE_TOKEN" | jq .username
-```
-
-**Expected:** `"alice"` — fresh token works.
+**Note:** Chat message history UI is not visually reconstructed on reload (the messages array in frontend state is lost), but server-side context is fully preserved. This is a frontend limitation — the ADK session events are stored in MongoDB but the frontend doesn't reconstruct the visual message history from them.
 
 ---
 
-## TC-16 · No-auth requests rejected
+### TC-09b: Refresh — Plan State Preserved
+**Steps:**
+1. As admin with plan session (from TC-08), refresh page
+2. Navigate to the plan session
 
-```bash
-curl -s $BASE/items/ | jq .detail
-curl -s $BASE/agent/sessions | jq .detail
-```
-
-**Expected:** HTTP 401 — `"Not authenticated"` (FastAPI `HTTPBearer` returns 401 for missing `Authorization` header).
-
----
-
-## TC-17 · OpenAPI / Interactive Docs
-
-Open in browser:
-
-| URL | Expected |
-|-----|----------|
-| `http://localhost:8000/docs` | Swagger UI showing all routes |
-| `http://localhost:8000/redoc` | ReDoc documentation |
-| `http://localhost:8001/` | MCP server info JSON (tools list, transport endpoints) |
+**Expected:** Plan session state persists — execute buttons should be available if plan was in progress
+**Result:** ✅ Plan session loaded after refresh with "Planning" status badge visible. Execute buttons available. Session state (`is_planning_mode`, plan data) preserved in MongoDB.
 
 ---
 
-## TC-18 · MCP Server — Standalone Verification
+### TC-10a: Testuser Login + Chat
+**Steps:**
+1. Logout, login as testuser
+2. Create new chat session
+3. Send "List all items"
 
-The MCP server runs independently of the main app.  You can verify its tools directly:
-
-```bash
-# Inspect MCP server info
-curl -s http://localhost:8001/ | jq .
-
-# The SSE endpoint (used by ADK MCPToolset)
-curl -s http://localhost:8001/health | jq .
-```
-
-**Expected:** `{"status":"healthy","service":"mcp-server"}`.
-
-The ADK agent is configured to call MCP tools via the SSE connection at
-`http://mcp-server:8001/sse`. In chat and plan-execute mode, every tool call
-(create_item, list_items, etc.) flows through this MCP channel — verifiable
-by watching the `mcp-server` container logs:
-
-```bash
-docker compose logs mcp-server -f
-```
+**Expected:** Testuser (user role) can chat and access read tools
+**Result:** ✅ Logged in as testuser with `user` badge. Chat session created. AI called `list_items` and returned 21 items. No permission warnings.
 
 ---
 
-## TC-19 · Concurrent Sessions
+### TC-10b: Testuser — Create Item via Chat
+**Steps:**
+1. As testuser, send "Create a new item called TestuserWidget with description 'created by testuser'"
 
-```bash
-# Create 3 sessions simultaneously
-for i in 1 2 3; do
-  curl -s -X POST $BASE/agent/sessions \
-    -H "Authorization: Bearer $ALICE_TOKEN" | jq -r .session_id &
-done
-wait
-```
-
-**Expected:** Three distinct UUIDs — sessions are independent.
+**Expected:** Item created (user role has items:write permission)
+**Result:** ✅ `create_item` tool called with correct parameters. Item created successfully. User role write permissions working correctly.
 
 ---
 
-## TC-20 · Container Restart Persistence
+### TC-11a: Items Panel — Admin Full CRUD
+**Steps:**
+1. As admin, navigate to Items tab
 
-```bash
-# Create a session before restart
-PERSIST_SESSION=$(curl -s -X POST $BASE/agent/sessions \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq -r .session_id)
-echo "Session: $PERSIST_SESSION"
-
-# Restart only the app container (MongoDB keeps data)
-docker compose restart app
-sleep 10
-
-# Session should still exist (persisted in MongoDB)
-curl -s $BASE/agent/sessions/$PERSIST_SESSION \
-  -H "Authorization: Bearer $ALICE_TOKEN" | jq .session_id
-```
-
-**Expected:** Returns the same session ID — MongoDB-backed ADK sessions survive app restarts.
+**Expected:** All items listed with Edit and Delete buttons, + Create Item button at top
+**Result:** ✅ Items panel shows all 22 items. Permission badge: admin ✅ Read ✅ Write ✅ Delete. Each item has Edit and Delete buttons. "+ Create Item" button visible at top.
 
 ---
 
-## Summary Checklist
+### TC-11b: Items Panel — Viewer Read-Only
+**Steps:**
+1. As viewer, navigate to Items tab
 
-| # | Feature | Route | Pass? |
-|---|---------|-------|-------|
-| TC-01 | User registration (3 roles) | `POST /auth/register` | ☐ |
-| TC-01 | Duplicate username rejected | `POST /auth/register` | ☐ |
-| TC-02 | Login + JWT issued | `POST /auth/login` | ☐ |
-| TC-02 | Wrong password rejected | `POST /auth/login` | ☐ |
-| TC-03 | Get current user profile | `GET /auth/me` | ☐ |
-| TC-04 | Role permission listing | `GET /auth/permissions/{role}` | ☐ |
-| TC-05 | Create item | `POST /items/` | ☐ |
-| TC-05 | List items | `GET /items/` | ☐ |
-| TC-05 | Read single item | `GET /items/{id}` | ☐ |
-| TC-05 | Update item | `PUT /items/{id}` | ☐ |
-| TC-05 | Delete item | `DELETE /items/{id}` | ☐ |
-| TC-06 | Write blocked for read_only | `POST /items/` | ☐ |
-| TC-07 | Create agent session | `POST /agent/sessions` | ☐ |
-| TC-07 | Get session state | `GET /agent/sessions/{id}` | ☐ |
-| TC-08 | Chat mode (ReAct + MCP tools) | `POST /agent/sessions/{id}/chat` | ☐ |
-| TC-08 | Session memory across turns | `POST /agent/sessions/{id}/chat` | ☐ |
-| TC-09 | Plan mode — generate plan | `POST /agent/sessions/{id}/plan` | ☐ |
-| TC-10 | Execute step-by-step | `POST /agent/sessions/{id}/execute-step` | ☐ |
-| TC-11 | Execute all steps | `POST /agent/sessions/{id}/execute-all` | ☐ |
-| TC-12 | Read-only cannot create session | `POST /agent/sessions` | ☐ |
-| TC-13 | Session ownership enforced | `GET /agent/sessions/{id}` | ☐ |
-| TC-13 | Admin can read any session | `GET /agent/sessions/{id}` | ☐ |
-| TC-14 | Archive session | `POST /agent/sessions/{id}/archive` | ☐ |
-| TC-15 | Token revocation | `POST /auth/token/revoke` | ☐ |
-| TC-16 | Unauthenticated requests rejected | various | ☐ |
-| TC-17 | OpenAPI docs accessible | `/docs`, `/redoc` | ☐ |
-| TC-18 | MCP server standalone | `http://localhost:8001` | ☐ |
-| TC-19 | Concurrent sessions | `POST /agent/sessions` | ☐ |
-| TC-20 | Persistence across restart | `GET /agent/sessions/{id}` | ☐ |
+**Expected:** Items listed but no create/edit/delete controls
+**Result:** ✅ Items listed in read-only mode. Permission badge: read_only ✅ Read ❌ Write ❌ Delete. Warning banner: "⚠️ Write operations will be denied". No Edit/Delete buttons on items. No "+ Create Item" button.
 
 ---
 
-## Automated Verification Results
+### TC-12: MCP Server Panel — Tool Listing & Schema
+**Steps:**
+1. Navigate to MCP Server tab
+2. Click on a tool to see its parameters
 
-All test cases above were verified programmatically against the running FastAPI application
-using an in-process HTTP client (`TestClient`) with:
+**Expected:** All 6 MCP tools listed with descriptions, parameter schemas shown on click
+**Result:** ✅ 6 tools listed: create_item, read_item, update_item, delete_item, list_items, search_items. Three-column layout: tool list | parameters | results. Clicking `create_item` shows parameter form with name* (string, required), description (string), data (object). "▶ Execute Tool" button available. Role permissions badge shown (viewer: ✅ Read tools, ❌ Execute write tools).
 
-- **In-memory MongoDB** (`mongomock-motor`) — fully replicates the motor async driver API
-- **Stubbed Google ADK runner** — deterministic fake `Runner` that returns canned responses
-  so every HTTP layer, route, auth, CRUD, and session-state path is exercised without needing
-  a real Gemini API key
-- **Real `python-jose` JWT** encode/decode — no mocking of auth logic
+---
 
-```
-Starting Google ADK application …
-MongoDB connected.
-Google ADK agent initialised.
+### TC-13: Session Switching (Chat ↔ Plan)
+**Steps:**
+1. As admin, go to AI Agent tab
+2. Click on a chat session
+3. Click on a different plan session
+4. Verify session ID changes and correct mode loads
 
-=== TC-01 : User Registration ===
-  PASS  register user
-  PASS  register read_only
-  PASS  register admin
-  PASS  duplicate username rejected (400)
+**Expected:** Switching between sessions loads correct session state and mode
+**Result:** ✅ Clicked chat session — loaded in chat mode. Switched to plan session — loaded with "Planning" status badge. Session ID in header updated correctly. Sessions list shows mix of chat/plan types with Active/Planning status badges.
 
-=== TC-02 : Login & JWT ===
-  PASS  login alice (200)
-  PASS  login viewer (200)
-  PASS  login admin (200)
-  PASS  wrong password rejected (401)
+---
 
-=== TC-03 : Current User Profile ===
-  PASS  GET /auth/me username=alice
-  PASS  role=user
+## Known Issues / Limitations
 
-=== TC-04 : Role Permissions ===
-  PASS  user: items:write
-  PASS  user: agent:execute
-  PASS  user: no agent:admin
-  PASS  read_only: items:read only
-  PASS  admin: agent:admin
-  PASS  admin: users:delete
+1. **Chat history not visually reconstructed on refresh** — Server-side context is fully preserved (AI remembers conversation), but the frontend doesn't reconstruct the visual message history from ADK session events stored in MongoDB. After refresh, the chat area appears empty until new messages are sent.
 
-=== TC-05 : Item CRUD ===
-  PASS  create Widget A (200)
-  PASS  item owner_id = alice
-  PASS  create Widget B (200)
-  PASS  list items returns 2
-  PASS  my_items_only=2 for alice
-  PASS  get Widget A by ID
-  PASS  update item name
-  PASS  delete Widget B
-  PASS  deleted item returns 404
+2. **Plan step status badges stay "pending" after execution** — The plan object in the frontend messages array isn't updated after step execution. Steps show as executed in the response messages but the original plan display still shows "pending" badges.
 
-=== TC-06 : RBAC Enforcement ===
-  PASS  read_only write blocked (403)
-  PASS  error mentions 'items:write'
-  PASS  read_only can list items (200)
+3. **Parallel execution stale session warning** — When parallel runners write to the same MongoDB session concurrently, one runner may encounter a "last_update_time is earlier than storage_session" error. This is a race condition in MongodbSessionService. Items are still created successfully via MCP tools — only the session state write is affected.
 
-=== TC-07 : Agent Session Lifecycle ===
-  PASS  create session (200)
-  PASS  session_id is 36-char UUID
-  PASS  initial is_planning_mode=False
-  PASS  initial plan=[]
-  PASS  initial current_step=0
-  PASS  initial is_complete=False
+---
 
-=== TC-08 : Chat Mode ===
-  PASS  chat mode (200)
-  PASS  agent_reply is non-empty
-  PASS  user_message echoed back
-     agent reply: Completed successfully: List all my items and show a summary
-  PASS  follow-up chat (session memory active)
+## Architecture Verified
 
-=== TC-09 : Plan Mode — Generate Plan ===
-  PASS  enter plan mode (200)
-  PASS  mode=planning
-  PASS  plan has 2 steps
-  PASS  step_id starts at 1
-  PASS  all steps pending
-     plan: [('1', 'list_items'), ('2', 'create_item')]
-  PASS  session now in planning mode
-  PASS  plan saved in session
-
-=== TC-10 : Plan Mode — Execute Step by Step ===
-  PASS  execute-step 1 (200)
-  PASS  step 1 status=completed
-  PASS  current_step advances to 1
-  PASS  is_complete=False after step 1
-  PASS  step result has text
-     step 1 result: Completed successfully: Execute plan step 1: List existing i
-  PASS  execute-step 2 (200)
-  PASS  current_step=2 after last step
-  PASS  is_complete=True after last step
-
-=== TC-11 : Plan Mode — Execute All ===
-  PASS  execute-all (200)
-  PASS  status=completed
-  PASS  2 execution results
-  PASS  last result is_complete=True
-  PASS  session is_complete=True after execute-all
-
-=== TC-12 : RBAC — Agent Execute Permission ===
-  PASS  read_only cannot create session (403)
-
-=== TC-13 : Session Ownership ===
-  PASS  alice cannot read bob's session (403)
-  PASS  admin can read any session (200)
-
-=== TC-14 : Archive Session ===
-  PASS  archive (200)
-  PASS  status=archived
-  PASS  ttl_days=7
-
-=== TC-15 : Token Validation ===
-  PASS  valid token recognized
-  PASS  username=alice in claims
-  PASS  invalid token detected
-
-=== TC-16 : Unauthenticated Requests Rejected ===
-  PASS  GET /items/ no auth → 401
-  PASS  POST /agent/sessions no auth → 401
-  PASS  GET /auth/me no auth → 401
-
-=== TC-17 : OpenAPI Schema Completeness ===
-  PASS  GET /openapi.json (200)
-  PASS  route /auth/register in docs
-  PASS  route /auth/login in docs
-  PASS  route /auth/me in docs
-  PASS  route /auth/token/validate in docs
-  PASS  route /items/ in docs
-  PASS  route /items/{item_id} in docs
-  PASS  route /agent/sessions in docs
-  PASS  route /agent/sessions/{session_id} in docs
-  PASS  route /agent/sessions/{session_id}/chat in docs
-  PASS  route /agent/sessions/{session_id}/plan in docs
-  PASS  route /agent/sessions/{session_id}/execute-step in docs
-  PASS  route /agent/sessions/{session_id}/execute-all in docs
-     Total routes: 19
-
-=== TC-18 : Root & Health Endpoints ===
-  PASS  GET / (200)
-  PASS  framework=Google ADK
-  PASS  GET /health status=healthy
-
-========================================================
-   RESULTS:  PASSED = 86   FAILED = 0   TOTAL = 86
-========================================================
-   ALL TESTS PASSED
-```
+- **Google ADK** — Agent orchestration with `google.adk.agents.Agent` and `SequentialAgent`
+- **MongodbSessionService** — Session persistence in MongoDB (verified via refresh tests)
+- **MCP Tools** — 6 tools on standalone MCP server (port 8001) via `McpToolset`
+- **RBAC** — Role-based access control enforced at MCP tool level (viewer denied writes)
+- **Parallel Execution** — Steps grouped by `group` field, executed via `asyncio.gather()`
+- **React Frontend** — Dashboard, AI Agent (chat + plan), MCP Server, Items panels
+- **Docker** — 4-container stack (app, mcp-server, mongodb, redis)

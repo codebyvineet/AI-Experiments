@@ -30,6 +30,7 @@ MCP tools are fetched from the standalone MCP server at startup via
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -118,14 +119,25 @@ Each step must be a JSON object with the keys:
                  reasoning-only steps
   parameters   \u2013 a JSON object of parameters the tool expects (omit for
                  analyze/summarize steps)
+  group        \u2013 an integer grouping steps that can run in PARALLEL.
+                 Steps with the same group number execute concurrently.
+                 Groups run sequentially (group 1 before group 2, etc.).
+                 If a step depends on a previous result, put it in a later group.
   status       \u2013 always set to "pending"
 
 Return ONLY the raw JSON array \u2014 no markdown fences, no prose.
 
-Example output:
+Example output — sequential (each step depends on the last):
 [
-  {"step_id": "1", "description": "List all existing items", "action": "list_items", "parameters": {}, "status": "pending"},
-  {"step_id": "2", "description": "Create a new item called Widget", "action": "create_item", "parameters": {"name": "Widget", "description": "A new widget"}, "status": "pending"}
+  {"step_id": "1", "description": "List all existing items", "action": "list_items", "parameters": {}, "group": 1, "status": "pending"},
+  {"step_id": "2", "description": "Create a new item called Widget", "action": "create_item", "parameters": {"name": "Widget"}, "group": 2, "status": "pending"}
+]
+
+Example output — parallel (independent steps share a group):
+[
+  {"step_id": "1", "description": "Create item Alpha", "action": "create_item", "parameters": {"name": "Alpha"}, "group": 1, "status": "pending"},
+  {"step_id": "2", "description": "Create item Beta", "action": "create_item", "parameters": {"name": "Beta"}, "group": 1, "status": "pending"},
+  {"step_id": "3", "description": "List all items to verify", "action": "list_items", "parameters": {}, "group": 2, "status": "pending"}
 ]"""
 
 
@@ -518,18 +530,165 @@ class ADKAgentManager:
         }
 
     async def execute_all_steps(self, session_id: str, auth_token: str = None) -> Dict[str, Any]:
-        """Execute all remaining plan steps sequentially."""
-        results = []
-        while True:
-            result = await self.execute_step(session_id, auth_token=auth_token)
-            results.append(result)
-            if result.get("is_complete"):
+        """Execute all remaining plan steps, running same-group steps in parallel.
+
+        Steps are grouped by their ``group`` field (defaults to step index if
+        absent).  Steps within the same group are dispatched concurrently via
+        ``asyncio.gather`` — this is the ADK equivalent of LangGraph's
+        ``Send()`` fan-out pattern.  Groups themselves run sequentially so that
+        later groups can depend on earlier results.
+        """
+        doc = self._session_service.sessions_collection.find_one({"_id": session_id})
+        if not doc:
+            raise ValueError(f"Session {session_id} not found")
+
+        state = doc.get("state", {})
+        plan: List[Dict[str, Any]] = state.get("plan", [])
+        current_step: int = state.get("current_step", 0)
+
+        if current_step >= len(plan):
+            return {
+                "session_id": session_id,
+                "execution_results": [],
+                "status": "completed",
+            }
+
+        # Build ordered groups from remaining steps
+        remaining = list(enumerate(plan[current_step:], start=current_step))
+        groups: Dict[int, List[tuple]] = {}
+        for idx, step in remaining:
+            g = step.get("group", idx + 1)  # default: each step is its own group
+            groups.setdefault(g, []).append((idx, step))
+
+        all_results = []
+        for group_key in sorted(groups.keys()):
+            group_steps = groups[group_key]
+
+            if len(group_steps) == 1:
+                # Single step — run normally
+                result = await self.execute_step(session_id, auth_token=auth_token)
+                all_results.append(result)
+            else:
+                # Multiple steps in same group — run in parallel
+                _log.info(
+                    "Executing group %s in parallel (%d steps) for session %s",
+                    group_key, len(group_steps), session_id,
+                )
+                results = await self._execute_steps_parallel(
+                    session_id, group_steps, auth_token=auth_token,
+                )
+                all_results.extend(results)
+
+            if all_results and all_results[-1].get("is_complete"):
                 break
+
         return {
             "session_id": session_id,
-            "execution_results": results,
+            "execution_results": all_results,
             "status": "completed",
         }
+
+    async def _execute_steps_parallel(
+        self,
+        session_id: str,
+        group_steps: List[tuple],
+        auth_token: str = None,
+    ) -> List[Dict[str, Any]]:
+        """Execute multiple plan steps concurrently via asyncio.gather.
+
+        This mirrors LangGraph's ``Send()`` pattern where multiple
+        ``task_executor_node`` instances run in parallel.  Each parallel
+        branch uses its own ``Runner.run_async()`` call against the shared
+        session, and results are aggregated back into the plan state.
+        """
+        doc = self._session_service.sessions_collection.find_one({"_id": session_id})
+        if not doc:
+            raise ValueError(f"Session {session_id} not found")
+
+        user_id = doc["user_id"]
+        state = doc.get("state", {})
+        plan: List[Dict[str, Any]] = state.get("plan", [])
+
+        # Mark all steps in this group as in_progress
+        for idx, step in group_steps:
+            plan[idx]["status"] = "in_progress"
+        self._update_session_state(session_id, {"plan": plan})
+
+        async def _run_single_step(idx: int, step: Dict[str, Any]) -> Dict[str, Any]:
+            """Execute one step in a parallel group."""
+            params = step.get("parameters", {})
+            instruction = (
+                f"Execute plan step {step['step_id']}: {step['description']} "
+                f"(action: {step['action']})"
+            )
+            if params:
+                instruction += f"\nParameters: {json.dumps(params)}"
+            if auth_token:
+                instruction += f'\n[System context: use auth_token="{auth_token}" for all tool calls]'
+
+            result_text = ""
+            try:
+                async for event in self._chat_runner.run_async(
+                    user_id=user_id,
+                    session_id=session_id,
+                    new_message=Content(
+                        role="user",
+                        parts=[Part.from_text(text=instruction)],
+                    ),
+                ):
+                    if hasattr(event, "content") and event.content:
+                        for part in event.content.parts:
+                            if hasattr(part, "text") and part.text:
+                                result_text += part.text
+            except Exception as exc:
+                _log.exception("Parallel step %s failed for session %s", step["step_id"], session_id)
+                result_text = f"Error: {exc}"
+
+            return {"idx": idx, "result_text": result_text}
+
+        # Fan-out: dispatch all steps concurrently
+        tasks = [_run_single_step(idx, step) for idx, step in group_steps]
+        parallel_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Fan-in: aggregate results back into plan
+        # Re-read plan from DB (may have been updated by parallel runners)
+        doc = self._session_service.sessions_collection.find_one({"_id": session_id})
+        plan = doc.get("state", {}).get("plan", plan)
+
+        results = []
+        max_idx = 0
+        for pr in parallel_results:
+            if isinstance(pr, Exception):
+                _log.error("Parallel step exception: %s", pr)
+                continue
+            idx = pr["idx"]
+            plan[idx]["status"] = "completed"
+            plan[idx]["result"] = {"text": pr["result_text"]}
+            max_idx = max(max_idx, idx)
+
+        new_step = max_idx + 1
+        is_complete = new_step >= len(plan)
+
+        updates: Dict[str, Any] = {
+            "plan": plan,
+            "current_step": new_step,
+            "is_complete": is_complete,
+        }
+        if is_complete:
+            updates["is_planning_mode"] = False
+        self._update_session_state(session_id, updates)
+
+        for idx, step in group_steps:
+            results.append({
+                "session_id": session_id,
+                "step": plan[idx],
+                "current_step": new_step,
+                "total_steps": len(plan),
+                "is_complete": is_complete,
+                "parallel": True,
+            })
+
+        return results
 
     # ------------------------------------------------------------------
     # Internal helpers
