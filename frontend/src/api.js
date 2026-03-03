@@ -216,8 +216,9 @@ export const api = {
   },
 
   async getMcpCapabilities() {
-    const res = await fetch(`${API_BASE}/mcp/capabilities`);
-    return res.json();
+    const res = await fetch(`${API_BASE}/mcp/health`);
+    const data = await res.json();
+    return data.mcp_server || data;
   },
 
   // Chat Mode (ReAct agent — direct tool calling)
