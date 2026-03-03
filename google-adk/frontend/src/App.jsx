@@ -75,7 +75,7 @@ export default function App() {
       <main className="p-6">
         {tab === 'Dashboard' && <Dashboard token={token} user={user} />}
         {tab === 'AI Agent' && <AgentPanel token={token} user={user} />}
-        {tab === 'MCP Server' && <McpPanel token={token} />}
+        {tab === 'MCP Server' && <McpPanel token={token} user={user} />}
         {tab === 'Items' && <ItemsPanel token={token} user={user} />}
       </main>
     </div>

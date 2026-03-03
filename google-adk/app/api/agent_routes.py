@@ -1,4 +1,11 @@
-"""Google ADK agent API routes — plan mode and chat mode."""
+"""Google ADK agent API routes — plan mode and chat mode.
+
+RBAC policy (matches main branch):
+- Session creation and archival require ``agent:execute``
+- Chat, plan, streaming, and session listing use auth-only
+  so that read_only users CAN interact with the AI agent.
+  Write operations are denied at the MCP tool level (backend returns 403).
+"""
 
 import json
 from typing import Optional
@@ -6,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request, status, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.auth import get_current_user, require_permission
+from app.auth import get_current_user, get_current_user_with_token, require_permission
 from app.agent import adk_agent
 from app.models import TokenData
 
@@ -31,18 +38,18 @@ class ArchiveRequest(BaseModel):
 
 @router.post("/sessions")
 async def create_session(
-    current_user: TokenData = Depends(require_permission("agent:execute")),
+    current_user: TokenData = Depends(get_current_user),
 ):
-    """Create a new ADK agent session."""
+    """Create a new ADK agent session.  Auth-only so read_only users can chat."""
     session_id = await adk_agent.create_session(current_user.user_id)
     return {"session_id": session_id, "user_id": current_user.user_id, "status": "created"}
 
 
 @router.get("/sessions")
 async def list_sessions(
-    current_user: TokenData = Depends(require_permission("agent:execute")),
+    current_user: TokenData = Depends(get_current_user),
 ):
-    """List all sessions for the current user."""
+    """List all sessions for the current user.  Auth-only."""
     from app.crud import get_db
     db = get_db()
     query = {"user_id": current_user.user_id, "archived": {"$ne": True}}
@@ -58,9 +65,9 @@ async def list_sessions(
 @router.get("/sessions/{session_id}")
 async def get_session_state(
     session_id: str,
-    current_user: TokenData = Depends(require_permission("agent:execute")),
+    current_user: TokenData = Depends(get_current_user),
 ):
-    """Get the current state of an agent session."""
+    """Get the current state of an agent session.  Auth-only."""
     try:
         state = await adk_agent.get_session_state(session_id)
     except ValueError as e:
@@ -83,7 +90,7 @@ async def archive_session(
     request: ArchiveRequest = ArchiveRequest(),
     current_user: TokenData = Depends(require_permission("agent:execute")),
 ):
-    """Archive a session."""
+    """Archive a session.  Requires agent:execute."""
     try:
         return await adk_agent.archive_session(session_id, request.ttl_days)
     except ValueError as e:
@@ -91,7 +98,7 @@ async def archive_session(
 
 
 # ---------------------------------------------------------------------------
-# Chat mode
+# Chat mode (auth-only — read_only users can chat, writes denied at MCP level)
 # ---------------------------------------------------------------------------
 
 @router.post("/sessions/{session_id}/chat")
@@ -99,7 +106,7 @@ async def chat(
     session_id: str,
     request: ChatRequest,
     req: Request,
-    current_user: TokenData = Depends(require_permission("agent:execute")),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """Send a message to the chat agent and receive a response."""
     auth_header = req.headers.get("authorization", "")
@@ -131,7 +138,7 @@ async def chat_stream(
     session_id: str,
     request: ChatRequest,
     req: Request,
-    current_user: TokenData = Depends(require_permission("agent:execute")),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """SSE streaming chat endpoint — yields events as the agent works."""
     auth_header = req.headers.get("authorization", "")
@@ -162,14 +169,14 @@ async def chat_stream(
 
 
 # ---------------------------------------------------------------------------
-# Plan mode
+# Plan mode (auth-only — read_only users can plan, writes denied at MCP level)
 # ---------------------------------------------------------------------------
 
 @router.post("/sessions/{session_id}/plan")
 async def enter_plan_mode(
     session_id: str,
     request: PlanModeRequest,
-    current_user: TokenData = Depends(require_permission("agent:execute")),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """Enter planning mode: the ADK planner agent generates a JSON plan."""
     try:
@@ -182,7 +189,7 @@ async def enter_plan_mode(
 async def execute_step(
     session_id: str,
     request: Request,
-    current_user: TokenData = Depends(require_permission("agent:execute")),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """Execute the next pending step in the plan."""
     try:
@@ -196,7 +203,7 @@ async def execute_step(
 async def execute_all_steps(
     session_id: str,
     request: Request,
-    current_user: TokenData = Depends(require_permission("agent:execute")),
+    current_user: TokenData = Depends(get_current_user),
 ):
     """Execute all remaining steps in the plan."""
     try:

@@ -163,6 +163,25 @@ async def get_current_user(
     return decode_token(token)
 
 
+async def get_current_user_with_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> tuple:
+    """Get current user AND raw token — for endpoints that need to pass the token downstream.
+
+    Returns (TokenData, raw_token_str).
+    """
+    token = credentials.credentials
+
+    if await is_token_blacklisted(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return decode_token(token), token
+
+
 def require_permission(permission: str):
     """Dependency to require a specific permission."""
     async def permission_checker(

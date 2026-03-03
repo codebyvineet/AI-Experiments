@@ -1,243 +1,196 @@
-"""Standalone FastMCP server — item CRUD tools with JWT RBAC.
+"""FastMCP Server with token-based authentication.
 
-This server runs as a separate Docker container (port 8001) and is
-completely independent of the Google ADK application.  The ADK agent
-connects via the SSE endpoint exposed by FastAPI below.
+This is a clean FastMCP implementation that uses:
+- @mcp.tool decorators for automatic schema generation
+- Native FastMCP framework with streamable-http transport
+- Auth token extraction from HTTP request headers (native) or parameter (JSON-RPC wrapper)
 
-Auth pattern
-------------
-Every tool accepts an optional ``auth_token`` parameter.  When the ADK
-agent calls a tool it injects the caller's JWT so the MCP server can
-validate permissions without coupling to the main app's auth layer.
+The MCP server NEVER accesses the database directly — all data operations
+go through the Backend API with the user's JWT token, so authorization
+is enforced at every layer.
 """
+import os
+import logging
+from typing import Optional, Dict, Any
 
-from typing import Any, Dict, List, Optional
-from datetime import datetime, timezone
+import httpx
+from fastmcp import FastMCP, Context
+from pydantic import Field
 
-from fastmcp import FastMCP
-
-mcp = FastMCP(
-    name="item-management-mcp",
-    instructions=(
-        "This MCP server provides item CRUD operations with RBAC. "
-        "Pass your JWT as `auth_token` when calling write/delete tools."
-    ),
+# Configure logging
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Auth helpers (inline, no shared lib dependency)
-# ---------------------------------------------------------------------------
+# Configuration
+BACKEND_URL = os.getenv("BACKEND_URL", "http://app:8000")
+MCP_SERVER_PORT = int(os.getenv("MCP_SERVER_PORT", "8001"))
 
-def _validate_token(token: str) -> Dict[str, Any]:
-    """Decode the JWT and return the payload, or raise PermissionError."""
-    import os
-    from jose import JWTError, jwt  # type: ignore
 
-    secret = os.getenv("JWT_SECRET_KEY", "")
-    algorithm = os.getenv("JWT_ALGORITHM", "HS256")
-
-    if not secret:
-        raise PermissionError("JWT_SECRET_KEY not configured on MCP server")
-
+def _extract_token_from_context(ctx: Context) -> str:
+    """Extract auth token from the MCP request's HTTP headers."""
     try:
-        payload = jwt.decode(token, secret, algorithms=[algorithm])
-        return payload
-    except JWTError as exc:
-        raise PermissionError(f"Invalid token: {exc}") from exc
+        from fastmcp.server.dependencies import get_http_request
+        request = get_http_request()
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            return auth_header[7:]
+    except Exception:
+        pass
+    return ""
 
 
-def _require_permission(token: str, permission: str) -> Dict[str, Any]:
-    """Validate token and assert the required permission is present."""
-    if not token:
-        raise PermissionError("Authentication required: provide auth_token")
+async def backend_request(
+    method: str,
+    path: str,
+    token: str,
+    json_data: Optional[Dict] = None,
+    params: Optional[Dict] = None
+) -> Dict[str, Any]:
+    """Make an authorized request to the Backend API."""
+    logger.info(f"[Backend] {method} {path}")
 
-    payload = _validate_token(token)
-    permissions: List[str] = payload.get("permissions", [])
+    async with httpx.AsyncClient(base_url=BACKEND_URL, timeout=30.0) as client:
+        headers = {"Authorization": f"Bearer {token}"}
 
-    if permission not in permissions:
-        raise PermissionError(
-            f"Permission denied: '{permission}' required "
-            f"(your permissions: {permissions})"
+        response = await client.request(
+            method=method,
+            url=path,
+            headers=headers,
+            json=json_data,
+            params=params
         )
 
-    return payload
+        logger.info(f"[Backend] Response: {response.status_code}")
+
+        if response.status_code == 401:
+            raise PermissionError("Unauthorized - invalid or expired token")
+        if response.status_code == 403:
+            detail = response.json().get("detail", "Insufficient permissions")
+            raise PermissionError(f"Permission denied: {detail}")
+        if response.status_code == 404:
+            return {"error": "Not found", "status_code": 404}
+
+        response.raise_for_status()
+        return response.json()
 
 
-# ---------------------------------------------------------------------------
-# Shared in-process item store (backed by the app's MongoDB in production;
-# the standalone server uses its own motor connection for independence)
-# ---------------------------------------------------------------------------
-
-def _get_db():
-    """Return the motor database handle (lazily connected)."""
-    import os
-    from motor.motor_asyncio import AsyncIOMotorClient  # type: ignore
-
-    mongo_url = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
-    database = os.getenv("MONGODB_DATABASE", "adk_demo")
-
-    client = AsyncIOMotorClient(mongo_url)
-    return client[database]
+# Create FastMCP server
+mcp = FastMCP(
+    name="AI-Experiments MCP Server"
+)
 
 
-# ---------------------------------------------------------------------------
-# MCP Tools
-# ---------------------------------------------------------------------------
+# ============================================================================
+# ITEM CRUD TOOLS
+# ============================================================================
 
-def _doc_to_dict(doc: dict) -> dict:
-    """Convert a MongoDB document to a JSON-serialisable dict."""
-    doc["id"] = str(doc.pop("_id"))
-    for k, v in doc.items():
-        if isinstance(v, datetime):
-            doc[k] = v.isoformat()
-    return doc
-
-
-@mcp.tool()
-async def list_items(
-    limit: int = 50,
-    auth_token: str = "",
-) -> List[Dict[str, Any]]:
-    """List all items in the system.
-
-    Requires permission: items:read
-    """
-    _require_permission(auth_token, "items:read")
-
-    db = _get_db()
-    cursor = db.items.find().limit(limit)
-    results = []
-    async for doc in cursor:
-        results.append(_doc_to_dict(doc))
-    return results
-
-
-@mcp.tool()
-async def read_item(
-    item_id: str,
-    auth_token: str = "",
-) -> Dict[str, Any]:
-    """Read a single item by its ID.
-
-    Requires permission: items:read
-    """
-    _require_permission(auth_token, "items:read")
-
-    from bson import ObjectId  # type: ignore
-
-    db = _get_db()
-    doc = await db.items.find_one({"_id": ObjectId(item_id)})
-    if not doc:
-        return {"error": f"Item {item_id} not found"}
-
-    return _doc_to_dict(doc)
-
-
-@mcp.tool()
+@mcp.tool
 async def create_item(
-    name: str,
-    description: str = "",
-    data: str = "{}",
-    owner_id: str = "",
-    auth_token: str = "",
-) -> Dict[str, Any]:
-    """Create a new item.
-
-    ``data`` should be a JSON-encoded string representing arbitrary metadata.
-
-    Requires permission: items:write
-    """
-    payload = _require_permission(auth_token, "items:write")
-    effective_owner = owner_id or payload.get("sub", "unknown")
-
-    import json as _json
-
-    try:
-        data_dict = _json.loads(data) if data else {}
-    except _json.JSONDecodeError:
-        data_dict = {}
-
-    db = _get_db()
-    now = datetime.now(timezone.utc)
-    item_doc = {
-        "name": name,
-        "description": description,
-        "data": data_dict,
-        "owner_id": effective_owner,
-        "created_at": now,
-        "updated_at": now,
-    }
-
-    result = await db.items.insert_one(item_doc)
-    return {
-        "id": str(result.inserted_id),
-        "name": name,
-        "description": description,
-        "owner_id": effective_owner,
-        "created_at": now.isoformat(),
-        "status": "created",
-    }
-
-
-@mcp.tool()
-async def update_item(
-    item_id: str,
-    name: Optional[str] = None,
-    description: Optional[str] = None,
-    data: Optional[str] = None,
-    auth_token: str = "",
-) -> Dict[str, Any]:
-    """Update an existing item.
-
-    Only non-None fields are updated.
-
-    Requires permission: items:write
-    """
-    _require_permission(auth_token, "items:write")
-
-    from bson import ObjectId  # type: ignore
-    import json as _json
-
-    updates: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
-    if name is not None:
-        updates["name"] = name
-    if description is not None:
-        updates["description"] = description
-    if data is not None:
-        try:
-            updates["data"] = _json.loads(data)
-        except _json.JSONDecodeError:
-            updates["data"] = {}
-
-    db = _get_db()
-    result = await db.items.update_one(
-        {"_id": ObjectId(item_id)},
-        {"$set": updates},
+    ctx: Context,
+    name: str = Field(description="The name of the item (required)"),
+    description: str = Field(default="", description="A description of the item"),
+    data: dict = Field(default_factory=dict, description="Additional JSON data"),
+    auth_token: str = Field(default="", description="Authorization token (auto-injected)")
+) -> dict:
+    """Create a new item in the database."""
+    token = _extract_token_from_context(ctx) or auth_token
+    logger.info(f"[create_item] Creating: {name}")
+    return await backend_request(
+        "POST", "/items/",
+        token=token,
+        json_data={"name": name, "description": description, "data": data}
     )
 
-    if result.matched_count == 0:
-        return {"error": f"Item {item_id} not found"}
 
-    return {"id": item_id, "updated_fields": list(updates.keys()), "status": "updated"}
+@mcp.tool
+async def read_item(
+    ctx: Context,
+    item_id: str = Field(description="The unique ID of the item to read"),
+    auth_token: str = Field(default="", description="Authorization token (auto-injected)")
+) -> dict:
+    """Read an item from the database by its ID."""
+    token = _extract_token_from_context(ctx) or auth_token
+    logger.info(f"[read_item] Reading: {item_id}")
+    return await backend_request("GET", f"/items/{item_id}", token=token)
 
 
-@mcp.tool()
+@mcp.tool
+async def update_item(
+    ctx: Context,
+    item_id: str = Field(description="The unique ID of the item to update"),
+    name: Optional[str] = Field(default=None, description="New name for the item"),
+    description: Optional[str] = Field(default=None, description="New description"),
+    data: Optional[dict] = Field(default=None, description="New JSON data"),
+    auth_token: str = Field(default="", description="Authorization token (auto-injected)")
+) -> dict:
+    """Update an existing item in the database."""
+    token = _extract_token_from_context(ctx) or auth_token
+    logger.info(f"[update_item] Updating: {item_id}")
+
+    update_data = {}
+    if name is not None:
+        update_data["name"] = name
+    if description is not None:
+        update_data["description"] = description
+    if data is not None:
+        update_data["data"] = data
+
+    return await backend_request("PUT", f"/items/{item_id}", token=token, json_data=update_data)
+
+
+@mcp.tool
 async def delete_item(
-    item_id: str,
-    auth_token: str = "",
-) -> Dict[str, Any]:
-    """Delete an item by ID.
+    ctx: Context,
+    item_id: str = Field(description="The unique ID of the item to delete"),
+    auth_token: str = Field(default="", description="Authorization token (auto-injected)")
+) -> dict:
+    """Delete an item from the database. This action is permanent."""
+    token = _extract_token_from_context(ctx) or auth_token
+    logger.info(f"[delete_item] Deleting: {item_id}")
+    result = await backend_request("DELETE", f"/items/{item_id}", token=token)
+    return {"success": True, "deleted_id": item_id, "result": result}
 
-    Requires permission: items:delete
-    """
-    _require_permission(auth_token, "items:delete")
 
-    from bson import ObjectId  # type: ignore
+@mcp.tool
+async def list_items(
+    ctx: Context,
+    skip: int = Field(default=0, description="Number of items to skip"),
+    limit: int = Field(default=100, description="Maximum items to return"),
+    auth_token: str = Field(default="", description="Authorization token (auto-injected)")
+) -> dict:
+    """List all items in the database with pagination."""
+    token = _extract_token_from_context(ctx) or auth_token
+    logger.info(f"[list_items] Listing (skip={skip}, limit={limit})")
+    items = await backend_request("GET", "/items/", token=token, params={"skip": skip, "limit": limit})
+    if isinstance(items, list):
+        return {"items": items, "count": len(items)}
+    return items
 
-    db = _get_db()
-    result = await db.items.delete_one({"_id": ObjectId(item_id)})
 
-    if result.deleted_count == 0:
-        return {"error": f"Item {item_id} not found"}
+# ============================================================================
+# SEARCH TOOLS
+# ============================================================================
 
-    return {"id": item_id, "status": "deleted"}
+@mcp.tool
+async def search_items(
+    ctx: Context,
+    query: str = Field(description="Search query string"),
+    field: str = Field(default="all", description="Field to search: all, name, description, data"),
+    limit: int = Field(default=20, description="Maximum results to return"),
+    offset: int = Field(default=0, description="Number of results to skip"),
+    auth_token: str = Field(default="", description="Authorization token (auto-injected)")
+) -> dict:
+    """Search items by text query."""
+    token = _extract_token_from_context(ctx) or auth_token
+    logger.info(f"[search_items] Searching: {query}")
+    result = await backend_request(
+        "GET", "/items/search",
+        token=token,
+        params={"q": query, "field": field, "limit": limit, "offset": offset}
+    )
+    if isinstance(result, list):
+        return {"items": result, "count": len(result), "query": query}
+    return result

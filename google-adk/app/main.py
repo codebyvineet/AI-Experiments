@@ -1,5 +1,6 @@
 """Main FastAPI application — Google ADK implementation."""
 
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,7 @@ from app.agent import adk_agent
 from app.api import auth_router, items_router, agent_router
 
 settings = get_settings()
+_log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -114,23 +116,38 @@ async def list_mcp_tools():
     """List available MCP tools from the standalone MCP server."""
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            # Use SSE to get tools list from MCP server
-            resp = await client.get(f"{settings.mcp_server_url}/sse")
-            # Fallback: return the known tools
-    except Exception:
-        pass
-    # Return known tool definitions (static for the current MCP server)
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{settings.mcp_server_url}/tools")
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as e:
+        _log.warning(f"Failed to fetch MCP tools: {e}")
+    # Fallback: return known tool definitions
     return {
         "tools": [
-            {"name": "list_items", "description": "List all items in the system", "parameters": {"limit": "int (default 50)", "auth_token": "string"}},
-            {"name": "read_item", "description": "Read a single item by ID", "parameters": {"item_id": "string", "auth_token": "string"}},
-            {"name": "create_item", "description": "Create a new item", "parameters": {"name": "string", "description": "string", "data": "JSON string", "auth_token": "string"}},
-            {"name": "update_item", "description": "Update an existing item", "parameters": {"item_id": "string", "name": "string?", "description": "string?", "data": "JSON string?", "auth_token": "string"}},
-            {"name": "delete_item", "description": "Delete an item by ID", "parameters": {"item_id": "string", "auth_token": "string"}},
+            {"name": "list_items", "description": "List all items in the database with pagination", "inputSchema": {"type": "object", "properties": {"skip": {"type": "integer"}, "limit": {"type": "integer"}}}},
+            {"name": "read_item", "description": "Read an item from the database by its ID", "inputSchema": {"type": "object", "properties": {"item_id": {"type": "string"}}, "required": ["item_id"]}},
+            {"name": "create_item", "description": "Create a new item in the database", "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string"}, "data": {"type": "object"}}, "required": ["name"]}},
+            {"name": "update_item", "description": "Update an existing item in the database", "inputSchema": {"type": "object", "properties": {"item_id": {"type": "string"}, "name": {"type": "string"}, "description": {"type": "string"}, "data": {"type": "object"}}, "required": ["item_id"]}},
+            {"name": "delete_item", "description": "Delete an item from the database", "inputSchema": {"type": "object", "properties": {"item_id": {"type": "string"}}, "required": ["item_id"]}},
+            {"name": "search_items", "description": "Search items by text query", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "field": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]}},
         ],
         "server_url": settings.mcp_server_url,
     }
+
+
+@app.get("/mcp/health")
+async def mcp_health():
+    """Check MCP server health by proxying to its /health endpoint."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{settings.mcp_server_url}/health")
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as e:
+        _log.warning(f"MCP health check failed: {e}")
+    return {"status": "unreachable", "server": "MCP Server"}
 
 
 if __name__ == "__main__":

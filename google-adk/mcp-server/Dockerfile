@@ -12,5 +12,5 @@ COPY src/ ./src/
 # Expose MCP server port
 EXPOSE 8001
 
-# FastMCP standalone SSE server — exposes /sse endpoint
+# FastAPI + FastMCP — JSON-RPC at /message, streamable-http at /mcp
 CMD ["python", "src/app.py"]

@@ -235,22 +235,29 @@ export default function AgentPanel({ token, user }) {
 
       {/* Main area */}
       <div className="flex-1 flex flex-col bg-gray-800 rounded-lg border border-gray-700">
-        {/* Mode toggle */}
+        {/* Mode toggle + read_only warning */}
         <div className="p-3 border-b border-gray-700 flex items-center justify-between">
-          <div className="flex bg-gray-700 rounded-lg p-0.5">
-            {['chat', 'plan'].map(m => (
-              <button
-                key={m}
-                onClick={() => setMode(m)}
-                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                  mode === m
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-400 hover:text-white'
-                }`}
-              >
-                {m === 'chat' ? '💬 Chat Mode' : '📋 Plan Mode'}
-              </button>
-            ))}
+          <div className="flex items-center gap-3">
+            <div className="flex bg-gray-700 rounded-lg p-0.5">
+              {['chat', 'plan'].map(m => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                    mode === m
+                      ? 'bg-blue-600 text-white'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  {m === 'chat' ? '💬 Chat Mode' : '📋 Plan Mode'}
+                </button>
+              ))}
+            </div>
+            {user?.role === 'read_only' && (
+              <span className="text-xs text-yellow-400 bg-yellow-900/30 border border-yellow-700/50 rounded px-2 py-1">
+                ⚠️ Read-only — write operations will be denied
+              </span>
+            )}
           </div>
           {activeSession && (
             <span className="text-xs text-gray-500 font-mono">Session: {activeSession.slice(0, 12)}...</span>
@@ -318,6 +325,21 @@ export default function AgentPanel({ token, user }) {
   );
 }
 
+/** Simple markdown-like rendering for assistant messages */
+function renderMarkdown(text) {
+  if (!text) return '';
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code class="bg-gray-800 px-1 py-0.5 rounded text-blue-300 text-xs">$1</code>')
+    .replace(/^- (.+)/gm, '<li class="ml-4 list-disc text-gray-300">$1</li>')
+    .replace(/^(\d+)\. (.+)/gm, '<li class="ml-4 list-decimal text-gray-300">$2</li>')
+    .replace(/\n/g, '<br/>');
+}
+
 function MessageBubble({ msg }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -335,20 +357,25 @@ function MessageBubble({ msg }) {
     return (
       <div className="flex justify-start">
         <div className="bg-gray-700 rounded-lg rounded-bl-sm px-4 py-2 max-w-[70%]">
-          <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+          <div className="text-sm prose-sm" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
         </div>
       </div>
     );
   }
 
   if (msg.role === 'tool_call') {
+    // Hide auth_token from displayed args
+    const displayArgs = { ...msg.args };
+    delete displayArgs.auth_token;
     return (
       <div className="flex justify-start">
         <div className="bg-yellow-900/30 border border-yellow-700/50 rounded-lg px-4 py-2 max-w-[80%]">
           <div className="flex items-center gap-2 text-yellow-400 text-sm font-medium">
             🔧 Calling <code className="bg-gray-800 px-1.5 py-0.5 rounded">{msg.name}</code>
           </div>
-          <pre className="text-xs text-gray-400 mt-1 overflow-x-auto">{JSON.stringify(msg.args, null, 2)}</pre>
+          {Object.keys(displayArgs).length > 0 && (
+            <pre className="text-xs text-gray-400 mt-1 overflow-x-auto">{JSON.stringify(displayArgs, null, 2)}</pre>
+          )}
         </div>
       </div>
     );

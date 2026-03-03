@@ -10,6 +10,10 @@ export default defineConfig({
       '/items': 'http://localhost:8000',
       '/agent': 'http://localhost:8000',
       '/health': 'http://localhost:8000',
+      '/mcp-proxy': {
+        target: 'http://localhost:8001',
+        rewrite: (path) => path.replace(/^\/mcp-proxy/, ''),
+      },
       '/mcp': 'http://localhost:8000',
     }
   }

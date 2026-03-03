@@ -78,11 +78,20 @@ export default function ItemsPanel({ token, user }) {
         )}
       </div>
 
-      {isReadOnly && (
-        <div className="bg-yellow-900/20 border border-yellow-700/50 rounded p-3 text-yellow-400 text-sm">
-          🔒 Read-only role — you can view items but not create, edit, or delete.
+      {/* Permissions banner */}
+      <div className="bg-gray-800 border border-gray-700 rounded-lg p-3">
+        <div className="flex items-center gap-4 text-sm">
+          <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+            user?.role === 'admin' ? 'bg-purple-600/30 text-purple-300' :
+            user?.role === 'user' ? 'bg-blue-600/30 text-blue-300' :
+            'bg-gray-600/30 text-gray-300'
+          }`}>{user?.role}</span>
+          <span>{isReadOnly ? '✅' : '✅'} Read</span>
+          <span>{!isReadOnly ? '✅' : '❌'} Write</span>
+          <span>{!isReadOnly ? '✅' : '❌'} Delete</span>
+          {isReadOnly && <span className="text-yellow-400 ml-auto">⚠️ Write operations will be denied</span>}
         </div>
-      )}
+      </div>
 
       {error && (
         <div className="bg-red-900/30 border border-red-700 text-red-300 rounded p-3 text-sm">{error}</div>

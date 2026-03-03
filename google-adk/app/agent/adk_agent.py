@@ -34,7 +34,7 @@ from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.mcp_tool import MCPToolset
-from google.adk.tools.mcp_tool.mcp_session_manager import SseConnectionParams
+from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
 from google.genai.types import Content, Part
 
 from app.config import get_settings
@@ -76,10 +76,13 @@ Example output:
 
 
 def _make_mcp_toolset() -> MCPToolset:
-    """Create an MCPToolset connected to the standalone MCP server."""
+    """Create an MCPToolset connected to the standalone MCP server.
+
+    Uses streamable-http transport at /mcp (matching the FastAPI-mounted endpoint).
+    """
     return MCPToolset(
-        connection_params=SseConnectionParams(
-            url=f"{settings.mcp_server_url}/sse",
+        connection_params=StreamableHTTPConnectionParams(
+            url=f"{settings.mcp_server_url}/mcp",
         ),
     )
 
