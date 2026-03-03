@@ -101,6 +101,41 @@ export default function Login({ onLogin }) {
             {isRegister ? 'Sign In' : 'Register'}
           </button>
         </p>
+
+        {/* Quick login buttons */}
+        {!isRegister && (
+          <div className="mt-6 border-t border-gray-700 pt-4">
+            <p className="text-xs text-gray-500 text-center mb-3">Quick Login (Demo Users)</p>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { username: 'admin', password: 'admin123456', role: 'admin', color: 'bg-purple-600 hover:bg-purple-700' },
+                { username: 'testuser', password: 'user123456', role: 'user', color: 'bg-blue-600 hover:bg-blue-700' },
+                { username: 'viewer', password: 'viewer123456', role: 'read_only', color: 'bg-gray-600 hover:bg-gray-500' },
+              ].map(u => (
+                <button
+                  key={u.username}
+                  disabled={loading}
+                  onClick={async () => {
+                    setError('');
+                    setLoading(true);
+                    try {
+                      const data = await login(u.username, u.password);
+                      onLogin(data.access_token, data.user || { username: u.username, role: u.role });
+                    } catch {
+                      setError(`User "${u.username}" not registered yet. Register first.`);
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                  className={`${u.color} text-white rounded py-2 text-xs font-medium transition-colors disabled:opacity-50`}
+                >
+                  <div>{u.username}</div>
+                  <div className="text-[10px] opacity-70">{u.role}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
