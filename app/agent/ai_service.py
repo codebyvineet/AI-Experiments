@@ -93,13 +93,26 @@ All operations go through the MCP Server which handles authorization.
 
 
 async def get_dynamic_tools_description() -> str:
-    """Get dynamic tools description from MCP server."""
+    """Get dynamic tools description from MCP server, including parameter schemas."""
     try:
         tools = await list_mcp_tools()
-        return "\n".join(
-            f"- **{t['name']}**: {t.get('description', 'No description')}"
-            for t in tools
-        )
+        lines = []
+        for t in tools:
+            schema = t.get("inputSchema", {})
+            props = schema.get("properties", {})
+            required = schema.get("required", [])
+            if props:
+                params = []
+                for pname, pinfo in props.items():
+                    ptype = pinfo.get("type", "any")
+                    pdesc = pinfo.get("description", "")
+                    req = " (REQUIRED)" if pname in required else ""
+                    params.append(f"    - {pname} ({ptype}{req}): {pdesc}")
+                params_str = "\n".join(params)
+                lines.append(f"- **{t['name']}**: {t.get('description', '')}\n  Parameters:\n{params_str}")
+            else:
+                lines.append(f"- **{t['name']}**: {t.get('description', '')}")
+        return "\n".join(lines)
     except Exception as e:
         logger.warning(f"Could not fetch MCP tools, using static description: {e}")
         return get_system_tools_description()
@@ -245,7 +258,7 @@ Response format:
                     "name": "Descriptive task name",
                     "description": "What this sub-task does",
                     "tool": "tool name from list above, or null for AI analysis",
-                    "tool_params": {{}}
+                    "tool_params": {{"param1": "actual_value_from_goal", "param2": "extracted_value"}}
                 }}
             ],
             "reasoning": "Why this step is needed",
@@ -657,10 +670,27 @@ Respond ONLY with valid JSON.
         try:
             structured_model = self._model.with_structured_output(schema)
             result = await structured_model.ainvoke([HumanMessage(content=prompt)])
-            return result
+            if result is not None:
+                return result
+            # Fallback: structured output returned None, try raw + manual parse
+            log.warning("⚠️ Structured output returned None, falling back to raw generation")
         except Exception as e:
-            log.error(f"❌ Structured generation error: {e}")
-            raise
+            log.warning(f"⚠️ Structured generation failed ({e}), falling back to raw generation")
+        
+        # Fallback: generate raw text and parse manually
+        raw = await self._model.ainvoke([HumanMessage(content=prompt)])
+        text = raw.content if hasattr(raw, 'content') else str(raw)
+        if isinstance(text, list):
+            text = "".join(p.get("text", str(p)) if isinstance(p, dict) else str(p) for p in text)
+        # Strip markdown fences
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+        import json as _json
+        return schema.model_validate(_json.loads(text))
 
 
 # Global AI service instance
