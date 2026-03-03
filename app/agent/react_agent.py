@@ -8,8 +8,9 @@ Uses framework methods exclusively:
 No custom ReAct logic — the framework handles think→act→observe→respond.
 """
 
+import asyncio
 import json
-from typing import Dict, Any, AsyncGenerator, Optional
+from typing import Dict, Any, AsyncGenerator, List, Optional
 
 from langchain_google_vertexai import ChatVertexAI
 from langgraph.prebuilt import create_react_agent
@@ -55,6 +56,83 @@ def _get_chat_model() -> ChatVertexAI:
         )
 
     return ChatVertexAI(**kwargs)
+
+
+def _extract_text_content(content) -> str:
+    """Extract plain text from LangChain message content (handles Gemini list-of-blocks format)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and "text" in part:
+                parts.append(part["text"])
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(parts)
+    return str(content) if content else ""
+
+
+async def get_chat_history(user_id: str) -> List[Dict[str, Any]]:
+    """
+    Retrieve conversation history for a user from the LangGraph checkpointer.
+
+    Returns a list of message dicts matching the frontend chatMessages format:
+      {"role": "user",      "content": "..."}
+      {"role": "assistant", "content": "..."}
+      {"role": "tool",      "tool": "...", "content": "...", "toolType": "call"}
+      {"role": "tool",      "tool": "...", "content": "...", "toolType": "result"}
+    """
+    thread_id = f"chat-{user_id}"
+    checkpointer = _get_chat_checkpointer()
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+    # MongoDBSaver.get() is synchronous — run in executor to avoid blocking event loop
+    checkpoint_tuple = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: checkpointer.get(config)
+    )
+
+    if not checkpoint_tuple:
+        return []
+
+    # MongoDBSaver.get() returns the Checkpoint dict directly (not a CheckpointTuple)
+    channel_values = checkpoint_tuple.get("channel_values", {})
+    raw_messages = channel_values.get("messages", [])
+
+    result = []
+    for msg in raw_messages:
+        msg_type = getattr(msg, "type", None)
+        content = getattr(msg, "content", "")
+
+        if msg_type == "human":
+            text = _extract_text_content(content)
+            if text:
+                result.append({"role": "user", "content": text})
+
+        elif msg_type == "ai":
+            tool_calls = getattr(msg, "tool_calls", [])
+            if tool_calls:
+                for tc in tool_calls:
+                    result.append({
+                        "role": "tool",
+                        "content": f"🔧 Calling **{tc['name']}**({json.dumps(tc.get('args', {}))})",
+                        "tool": tc["name"],
+                        "toolType": "call",
+                    })
+            else:
+                text = _extract_text_content(content)
+                if text:
+                    result.append({"role": "assistant", "content": text})
+
+        elif msg_type == "tool":
+            result.append({
+                "role": "tool",
+                "content": str(content)[:2000],
+                "tool": getattr(msg, "name", "tool") or "tool",
+                "toolType": "result",
+            })
+
+    return result
 
 
 async def chat_stream(
@@ -121,7 +199,7 @@ async def chat_stream(
             stream_mode="updates",
             config={"configurable": {"thread_id": thread_id}, "recursion_limit": 25},
         ):
-            for node_name, node_output in chunk.items():
+            for _, node_output in chunk.items():
                 messages = node_output.get("messages", [])
                 for msg in messages:
                     if msg.type == "ai":

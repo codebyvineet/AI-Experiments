@@ -233,5 +233,13 @@ export const api = {
       },
       body: JSON.stringify({ message })
     });
+  },
+
+  async getChatHistory(token) {
+    const res = await fetch(`${API_BASE}/stream/chat/history`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: Failed to load chat history`);
+    return res.json();
   }
 };

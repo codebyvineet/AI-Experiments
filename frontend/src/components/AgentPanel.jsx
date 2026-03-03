@@ -30,6 +30,29 @@ export default function AgentPanel({ token, user }) {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
 
+  // Load chat history from backend when entering chat mode (once per session)
+  const loadChatHistory = async () => {
+    try {
+      const data = await api.getChatHistory(token);
+      if (data.messages && data.messages.length > 0) {
+        setChatMessages([
+          { role: 'system', content: '── Previous conversation ──' },
+          ...data.messages,
+          { role: 'system', content: '── New messages ──' },
+        ]);
+      }
+    } catch (err) {
+      console.error('Failed to load chat history:', err);
+      // Fail silently — chat still works, just starts fresh
+    }
+  };
+
+  useEffect(() => {
+    if (mode === 'chat' && chatMessages.length === 0 && token) {
+      loadChatHistory();
+    }
+  }, [mode]);
+
   // Chat mode: send message and stream ReAct agent response
   const handleChatSend = async () => {
     const msg = chatInput.trim();

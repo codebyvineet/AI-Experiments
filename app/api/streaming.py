@@ -100,6 +100,24 @@ async def stream_chat(
     )
 
 
+@router.get("/chat/history")
+async def get_chat_history_endpoint(
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Retrieve chat conversation history for the current user.
+
+    Returns messages in the same format as the frontend chatMessages array,
+    sourced from the LangGraph MongoDBSaver checkpointer (thread_id = chat-{user_id}).
+    """
+    from app.agent.react_agent import get_chat_history
+    log = LogContext(logger, user_id=current_user.user_id)
+    log.info("📥 Request: Get chat history")
+    messages = await get_chat_history(current_user.user_id)
+    log.info(f"📤 Response: {len(messages)} chat history messages")
+    return {"messages": messages, "thread_id": f"chat-{current_user.user_id}"}
+
+
 @router.post("/sessions")
 async def create_streaming_session(
     request: CreateSessionRequest,
