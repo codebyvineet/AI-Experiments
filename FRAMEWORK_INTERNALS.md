@@ -18,6 +18,11 @@ This document covers the internal mechanics of both frameworks used in this proj
 10. [Concurrent Input: What Happens When AI Is Running](#9-concurrent-input-what-happens-when-ai-is-running)
 11. [LangGraph vs Google ADK Side-by-Side](#10-langgraph-vs-google-adk-side-by-side)
 12. [Sub-Agents and Multi-Agent Patterns](#12-sub-agents-and-multi-agent-patterns)
+13. [Session Registry: Framework-Agnostic Session Management](#13-session-registry-framework-agnostic-session-management)
+14. [Long-running Task Resilience: SSE Disconnect Behaviour](#14-long-running-task-resilience-sse-disconnect-behaviour)
+15. [Implementing Long-running Tools](#15-implementing-long-running-tools)
+16. [How MCP Requests Are Authenticated](#16-how-mcp-requests-are-authenticated)
+17. [Token Generation from User Identity](#17-token-generation-from-user-identity)
 
 ---
 
@@ -579,9 +584,9 @@ ADK uses two separate agents and two separate runners:
 | `planner_agent` | `_plan_runner` | Generates JSON plan — instructed NOT to call tools | MCPToolset (for schema awareness only) |
 | `chat_agent` | `_chat_runner` | Executes each step using MCP tools | MCPToolset (actively calls tools) |
 
-The planner is given `MCPToolset` so it can see the real tool names and parameter schemas. Its system instruction explicitly forbids it from making tool calls — it must output a raw JSON array only. The `chat_agent` (executor) is then called once per step by `execute_step()`.
+The planner is given `MCPToolset` so it can see the real tool names and parameter schemas. Its system instruction explicitly forbids it from making tool calls — it must output a raw JSON array only.
 
-Steps execute **sequentially** (`execute_step()` → `execute_all_steps()` loop), unlike LangGraph which can fan out in parallel with `Send()`.
+`execute_step()` handles one step at a time (for step-by-step UI control). `execute_all_steps()` handles the full plan using ADK's native `SequentialAgent` + `ParallelAgent` hierarchy built dynamically at runtime from the `group` field.
 
 **ADK plan flow:**
 ```
@@ -592,35 +597,44 @@ POST /agent/sessions/{id}/plan  →  _plan_runner.run_async("Generate a plan for
                                     → _update_session_state({plan, goal, current_step: 0})
                                     → returns {plan, total_steps}
 
-POST /agent/sessions/{id}/execute-step  →  _chat_runner.run_async("Execute step N: {description}")
-                                            → chat agent calls MCP tools
+POST /agent/sessions/{id}/execute-step  →  execute_step()
+                                            → dynamically creates LlmAgent for the single step
+                                            → new Runner.run_async() — result stored via output_key
                                             → _update_session_state({plan, current_step: N+1})
                                             → returns {step, is_complete}
 
 POST /agent/sessions/{id}/execute-all   →  execute_all_steps()
-                                            → groups steps by "group" field
-                                            → same-group steps → asyncio.gather() [parallel]
-                                            → groups run sequentially
-                                            → returns {execution_results, status}
+                                            → _build_execution_pipeline(remaining_steps, auth_token)
+                                            → single runner.run_async("Proceed.") triggers full pipeline
+                                            → results stored in session.state via output_key per step
+                                            → returns {execution_results, status: "completed"}
 ```
 
-**Parallel execution via `group` field:**
+**Parallel execution via ADK native `SequentialAgent` + `ParallelAgent`:**
 
-The planner is instructed to assign a `group` integer to each step. Steps in the same group are independent and can run concurrently. Steps in later groups depend on earlier groups:
+`_build_execution_pipeline()` reads the `group` field from each plan step and dynamically constructs an agent hierarchy at runtime — no hardcoded structure:
 
 ```
 Plan: [
-  {step_id: "1", group: 1, action: "create_item", ...},   ← run in parallel
-  {step_id: "2", group: 1, action: "create_item", ...},   ← run in parallel
-  {step_id: "3", group: 2, action: "list_items",  ...},   ← waits for group 1
+  {step_id: "1", group: 1, action: "create_item", ...},
+  {step_id: "2", group: 1, action: "create_item", ...},
+  {step_id: "3", group: 2, action: "list_items",  ...},
 ]
 
-execute_all_steps() execution order:
-  Group 1: asyncio.gather(_run_single_step(0), _run_single_step(1))  ← concurrent
-  Group 2: execute_step(2)                                           ← sequential, after group 1
+Pipeline built at runtime:
+  SequentialAgent("execution_pipeline")
+  ├── ParallelAgent("parallel_group_1")        ← group 1 (two steps → ParallelAgent)
+  │     ├── LlmAgent("step_1_executor")  output_key="step_1_result"
+  │     └── LlmAgent("step_2_executor")  output_key="step_2_result"
+  ├── LlmAgent("step_3_executor")              ← group 2 (single step → bare LlmAgent)
+  │     output_key="step_3_result"
+  └── LlmAgent("execution_summary")            ← always appended; reads all step results
+        output_key="execution_summary"
 ```
 
-This is the ADK equivalent of LangGraph's `Send()` fan-out — implemented manually via `asyncio.gather` since ADK doesn't natively orchestrate parallel execution at the `Runner` level.
+Each step executor is an `LlmAgent` with `output_key=f"step_{step_id}_result"` — ADK automatically writes the agent's final text output to `session.state[output_key]` after the turn. The summary agent's instruction references all `{step_N_result}` template vars, which ADK resolves from session state before the agent runs.
+
+A single `runner.run_async("Proceed.")` drives the entire pipeline. ADK handles all scheduling — `ParallelAgent` fans out concurrently, `SequentialAgent` enforces group ordering. This is equivalent to LangGraph's `Send()` fan-out but using ADK's native orchestration primitives instead of manual `asyncio.gather`.
 
 ---
 
@@ -1012,7 +1026,7 @@ ADK's `Runner.run_async()` reads and writes session state via `MongodbSessionSer
 | **Tool auth** | JWT injected into HTTP header at client creation time | JWT passed as text in user message (workaround) |
 | **Conversation memory** | `MongoDBSaver` checkpointer — survives restart | `MongodbSessionService` — survives restart |
 | **Plan persistence** | Full state in MongoDB checkpoints (automatic) | State in framework's `adk_sessions` (mixed: events auto, plan state via manual `_update_session_state()`) |
-| **Parallel execution** | `Send()` fan-out — true parallel graph branches | `asyncio.gather()` on same-`group` plan steps — implemented in `execute_all_steps()` |
+| **Parallel execution** | `Send()` fan-out — true parallel graph branches | `SequentialAgent` + `ParallelAgent` hierarchy built dynamically from `group` field in `_build_execution_pipeline()` |
 | **Human-in-the-loop** | `interrupt()` / `Command(resume=...)` — built-in | Not built-in (manual workflow control) |
 | **Custom state injection** | `graph.aupdate_state(config, patch, as_node=...)` | Direct MongoDB write via `_update_session_state()` helper |
 | **Streaming** | `graph.astream(stream_mode="updates" or "values")` | `runner.run_async()` is an async generator |
@@ -1033,15 +1047,15 @@ Sub-agents allow one agent to delegate work to another specialised agent. Both f
 
 | Concept | Google ADK | LangGraph |
 |---|---|---|
-| A coordinator that calls sub-agents | `SequentialAgent` / `ParallelAgent` as the root | Supervisor `LlmAgent` node or custom router node |
-| A specialised worker agent | `LlmAgent` listed in `sub_agents=[...]` | Compiled subgraph called as a node, or a tool-wrapped agent |
-| One agent calling another on demand | `AgentTool` wraps an agent as a callable tool | Tool-wrapped subgraph, or `Command(goto=...)` handoff |
+| A coordinator that calls sub-agents | `SequentialAgent` / `ParallelAgent` as the root | `create_supervisor()` from `langgraph-supervisor` package, or manual supervisor node |
+| A specialised worker agent | `LlmAgent` listed in `sub_agents=[...]` | `create_react_agent()` passed to `create_supervisor(agents=[...])`, or a compiled subgraph node |
+| One agent calling another on demand | `AgentTool` wraps an agent as a callable tool | Tool-wrapped subgraph (`@tool`), or `create_handoff_tool(agent_name=...)` from `langgraph-supervisor` |
 | Agents run one after another | `SequentialAgent` | Edges between nodes, or `Command(goto=...)` chain |
 | Agents run in parallel | `ParallelAgent` | `Send()` fan-out from a conditional edge |
 | Agent loops until done | `LoopAgent` | Cycle in the graph (`should_continue` edge loops back) |
 
 > **Current state in this project:**
-> - **ADK**: Two independent `LlmAgent` instances (planner + executor) called manually. Parallel execution is already implemented via `asyncio.gather` using the `group` field in plan steps — `execute_all_steps()` fans out same-group steps concurrently. `SequentialAgent`, `ParallelAgent`, and `AgentTool` are not yet used.
+> - **ADK**: `SequentialAgent` and `ParallelAgent` are **already in production use**. `execute_all_steps()` calls `_build_execution_pipeline()` which dynamically constructs a `SequentialAgent` → `ParallelAgent` hierarchy at runtime from the plan's `group` field. Each step executor is an `LlmAgent` with `output_key` — results flow through session state automatically. A summary `LlmAgent` is always appended at the end. `AgentTool` is not yet used.
 > - **LangGraph**: `Send()` fan-out is already used for parallel task execution in plan mode. Subgraphs, supervisor patterns, and `Command(goto=...)` handoffs are not yet used.
 >
 > The patterns below are step-by-step guides for adding formal sub-agent support to either framework.
@@ -1277,15 +1291,26 @@ retry_executor = LoopAgent(
 
 ### LangGraph — Sub-Agent Types
 
-LangGraph doesn't have "sub-agent" classes — it uses **graph composition** patterns instead:
+LangGraph core doesn't have dedicated sub-agent classes like ADK's `SequentialAgent` / `ParallelAgent`. Instead it uses **graph composition** patterns. For the supervisor pattern specifically, a first-party package `langgraph-supervisor` provides higher-level prebuilts:
 
-| Pattern | Mechanism | When to use |
-|---|---|---|
-| **Subgraph as node** | Compile a child `StateGraph`, call it as a node in the parent | Encapsulate a reusable multi-step workflow |
-| **`Send()` fan-out** | Conditional edge returns `List[Send]` to spawn N parallel node instances | Already used in this project for parallel tasks |
-| **Supervisor + handoff** | A router LLM decides which specialised agent node runs next | Dynamic routing based on the user's query |
-| **`Command(goto=...)` handoff** | A node returns `Command(goto="other_node", update={...})` | One agent explicitly passes control to another |
-| **Tool-wrapped subgraph** | Compile a subgraph, wrap it as a `@tool`, give it to a `create_react_agent` | ReAct agent that delegates to a full subgraph |
+```bash
+pip install langgraph-supervisor   # separate package, maintained by LangChain team
+```
+
+```python
+from langgraph_supervisor import create_supervisor, create_handoff_tool
+from langgraph.prebuilt import create_react_agent
+```
+
+> **Recommendation from LangChain docs (2025):** For most supervisor use-cases, implementing the pattern directly via tools (`create_react_agent` + `create_handoff_tool`) is preferred over the `create_supervisor()` wrapper — it gives more control with less abstraction overhead.
+
+| Pattern | Mechanism | Package | When to use |
+|---|---|---|---|
+| **Subgraph as node** | Compile a child `StateGraph`, call it as a node in the parent | `langgraph` core | Encapsulate a reusable multi-step workflow |
+| **`Send()` fan-out** | Conditional edge returns `List[Send]` to spawn N parallel node instances | `langgraph` core | Already used in this project for parallel tasks |
+| **`Command(goto=...)` handoff** | A node returns `Command(goto="other_node", update={...})` | `langgraph` core | One agent explicitly passes control to another |
+| **Tool-wrapped subgraph** | Compile a subgraph, wrap it as a `@tool`, give it to a `create_react_agent` | `langgraph` core | ReAct agent that delegates to a full subgraph |
+| **Supervisor (prebuilt)** | `create_supervisor(agents=[...], model=..., prompt=...)` — central LLM routes to sub-agents via `create_handoff_tool` | `langgraph-supervisor` | Hierarchical teams; one supervisor coordinates N specialists |
 
 ---
 
@@ -1620,10 +1645,11 @@ The supervisor loop continues until the routing LLM decides the goal is complete
 
 | Scenario | ADK | LangGraph |
 |---|---|---|
-| Chat agent needs a specialist for one type of query | `AgentTool` wrapping an `LlmAgent` | `@tool` wrapping a compiled subgraph |
+| Chat agent needs a specialist for one type of query | `AgentTool` wrapping an `LlmAgent` | `@tool` wrapping a compiled subgraph, or `create_handoff_tool` |
 | Sequential pipeline (plan → execute) | `SequentialAgent([planner, executor])` | Chain of nodes with edges, or `Command(goto=...)` |
-| Parallel tasks within a plan step | `ParallelAgent([task_a, task_b])` | `Send()` fan-out (already implemented) |
-| Dynamic routing based on query type | `AgentTool` + routing instruction in orchestrator | Supervisor node with `Command(goto=...)` |
+| Parallel tasks within a plan step | `ParallelAgent([task_a, task_b])` — **already implemented** | `Send()` fan-out — **already implemented** |
+| Hierarchical team (supervisor + N specialists) | `SequentialAgent` / `ParallelAgent` with multiple `LlmAgent` sub-agents | `create_supervisor(agents=[agent_a, agent_b], model=..., prompt=...)` from `langgraph-supervisor` |
+| Dynamic routing based on query type | `AgentTool` + routing instruction in orchestrator | `create_supervisor()` with `create_handoff_tool(agent_name=...)` per specialist |
 | Retry failed steps | `LoopAgent(max_iterations=3)` | Conditional edge looping back to executor node |
 | Encapsulate a reusable multi-step workflow | `SequentialAgent` with named `sub_agents` | Compile subgraph, add as named node |
 
@@ -1681,3 +1707,873 @@ response = await session_service.list_sessions(app_name=..., user_id=...)
 # Write plan metadata outside of run_async (direct MongoDB update)
 adk_agent._update_session_state(session_id, {"plan": plan, "current_step": 2})
 ```
+
+---
+
+## 13. Session Registry: Framework-Agnostic Session Management
+
+### The Problem with the Current Approach
+
+Both frameworks manage their own session storage independently:
+
+| | LangGraph | ADK |
+|---|---|---|
+| Session ID source | `str(uuid.uuid4())` in `graph.py` | `str(uuid.uuid4())` in `adk_agent.py` |
+| Where stored | `checkpoints` collection (binary msgpack) | `adk_sessions` collection (JSON) |
+| List sessions via | `db.checkpoints.distinct("thread_id")` + deserialize each | `session_service.list_sessions()` |
+| Mode stored? | No — not in checkpoint | Yes — in `adk_sessions.state` |
+| Mode restored on refresh? | No — frontend defaults | Stored but frontend never reads it back |
+| Created-at timestamp? | Internal checkpoint ts (buried in binary) | `create_time` field in `adk_sessions` |
+| Cross-framework query? | Not possible — separate DBs | Not possible |
+
+To list all sessions you must query two different collections in two different databases, deserialise binary blobs for LangGraph, and join on `user_id` manually. There is no single source of truth.
+
+---
+
+### The Session Registry Pattern
+
+The standard production approach is: **your application owns the session lifecycle; the framework is just the execution engine.**
+
+You generate the session ID, write it to your own registry collection *before* handing it to the framework, and the framework stores its checkpoint/event data keyed to that same ID. The registry is always queryable — it never requires deserialising binary blobs.
+
+```
+┌──────────┐   POST /sessions    ┌──────────────────┐
+│ Frontend │ ─────────────────►  │  Your API        │
+└──────────┘                     │  1. gen UUID     │
+                                 │  2. write to     │
+                                 │     session_     │
+                                 │     registry     │
+                                 │  3. pass ID to   │
+                                 │     framework    │
+                                 └────────┬─────────┘
+                                          │
+                     ┌────────────────────┼──────────────────────┐
+                     ▼                    ▼                       ▼
+             session_registry        checkpoints           adk_sessions
+             (your collection)    (LangGraph internal)  (ADK internal)
+             ─────────────────    ────────────────────  ─────────────
+             _id: uuid            thread_id: uuid       _id: uuid
+             framework: "lg"      checkpoint: <bin>     state: {...}
+             mode: "plan"         metadata: <bin>       plan: [...]
+             user_id: "..."
+             status: "active"
+             created_at: ...
+             updated_at: ...
+```
+
+Both framework collections are keyed to the **same UUID** — `thread_id` in LangGraph and `_id` in ADK sessions. So `session_registry._id` == `checkpoints.thread_id` == `adk_sessions._id`. No join needed — it is the same value.
+
+---
+
+### `session_registry` Collection Schema
+
+```json
+{
+  "_id": "a3f2b1c4-9e7d-4c2e-b1f3-8d7e6a5b4c3d",
+  "user_id": "user_demo",
+  "framework": "langgraph",
+  "mode": "plan",
+  "status": "awaiting_approval",
+  "goal": "Create two items and verify they exist",
+  "created_at": "2026-03-03T09:00:00Z",
+  "updated_at": "2026-03-03T09:05:00Z"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `_id` | UUID string | The session ID — **same value used as LangGraph `thread_id` or ADK session `_id`** |
+| `user_id` | string | Owner |
+| `framework` | `"langgraph"` \| `"adk"` | Which engine owns the execution state |
+| `mode` | `"chat"` \| `"plan"` | UI mode — the single source of truth for the frontend |
+| `status` | `"active"` \| `"awaiting_approval"` \| `"executing"` \| `"completed"` \| `"failed"` \| `"archived"` | Lifecycle state — maintained by your API, not derived from framework |
+| `goal` | string | The user's original goal (for list display — no deserialisation needed) |
+| `created_at` | ISO timestamp | Set once on creation |
+| `updated_at` | ISO timestamp | Updated on every status change |
+
+**What to NOT put in the registry:**
+
+- Plan steps — those belong in the framework's checkpoint/state
+- Message history — that belongs in `checkpoints` / `adk_events`
+- Tool results — framework's job
+- Any data that the framework already owns
+
+The registry is deliberately thin — it is a **fast-query index**, not a copy of the framework's data.
+
+---
+
+### How It Solves the Existing Gaps
+
+**Mode restoration on refresh:**
+```javascript
+// Frontend: load sessions on mount
+const sessions = await api.listSessions(token);  // queries session_registry
+// Each session already has mode — no deserialisation, no extra requests
+const lastMode = sessions[0]?.mode || 'plan';
+setMode(lastMode);
+```
+
+**Listing sessions without deserialising checkpoints:**
+```python
+# Before (current LangGraph approach) — O(n) deserialisations
+thread_ids = db.checkpoints.distinct("thread_id")
+for tid in thread_ids:
+    state = await graph.aget_state({"configurable": {"thread_id": tid}})
+    # ^^^^ deserialises msgpack blob for every session
+
+# After (registry approach) — single O(1) query
+sessions = list(db.session_registry.find({"user_id": user_id}).sort("updated_at", -1))
+```
+
+**Cross-framework session list:**
+```python
+# One query, both frameworks
+db.session_registry.find({
+    "user_id": user_id,
+    "status": {"$ne": "archived"}
+}).sort("updated_at", -1)
+```
+
+**Status sync — who updates `status`?**
+Your API layer updates `session_registry.status` as the execution progresses. The framework doesn't touch the registry. Example flow for LangGraph plan mode:
+
+```
+POST /sessions           → write registry {status: "active"}
+GET /plan (stream)       → SSE yields "plan_complete"   → update registry {status: "awaiting_approval"}
+GET /execute (stream)    → SSE yields "completed"       → update registry {status: "completed", updated_at: now}
+POST /sessions/{id}/stop → your handler                 → update registry {status: "archived"}
+```
+
+---
+
+### Implementation Sketch
+
+**1. Session creation (LangGraph, but identical for ADK):**
+
+```python
+async def create_session(goal: str, user_id: str, framework: str, mode: str) -> str:
+    session_id = str(uuid.uuid4())
+
+    # Write registry first — before touching the framework
+    db.session_registry.insert_one({
+        "_id": session_id,
+        "user_id": user_id,
+        "framework": framework,
+        "mode": mode,
+        "status": "active",
+        "goal": goal[:200],
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+    })
+
+    # Pass same ID to framework
+    if framework == "langgraph":
+        config = {"configurable": {"thread_id": session_id}}
+        await graph.ainvoke(initial_state, config)
+    elif framework == "adk":
+        await session_service.create_session(
+            app_name=APP_NAME, user_id=user_id, session_id=session_id
+        )
+
+    return session_id
+```
+
+**2. List sessions (fast, no deserialisation):**
+
+```python
+def list_sessions(user_id: str) -> list:
+    return list(
+        db.session_registry
+          .find({"user_id": user_id, "status": {"$ne": "archived"}})
+          .sort("updated_at", -1)
+          .limit(50)
+    )
+```
+
+**3. Fetch framework detail when needed:**
+
+```python
+async def get_session_detail(session_id: str) -> dict:
+    reg = db.session_registry.find_one({"_id": session_id})
+    if not reg:
+        raise HTTPException(404)
+
+    if reg["framework"] == "langgraph":
+        state = await graph.aget_state({"configurable": {"thread_id": session_id}})
+        detail = state.values  # full AgentState
+    else:
+        session = await session_service.get_session(
+            app_name=APP_NAME, user_id=reg["user_id"], session_id=session_id
+        )
+        detail = session.state
+
+    return {**reg, "detail": detail}
+```
+
+The list endpoint hits only the registry (fast). The detail endpoint hits the framework only when a user opens a specific session.
+
+---
+
+### Chat Mode: Special Case
+
+For LangGraph chat mode, the thread ID is `chat-{user_id}` — not a UUID. There is only one chat thread per user, not a list of sessions. The registry entry looks like:
+
+```json
+{
+  "_id": "chat-user_demo",
+  "user_id": "user_demo",
+  "framework": "langgraph",
+  "mode": "chat",
+  "status": "active",
+  "goal": null,
+  "created_at": "2026-03-03T09:00:00Z",
+  "updated_at": "2026-03-03T09:30:00Z"
+}
+```
+
+This entry is upserted (not inserted) on each chat message — it is the singleton chat record for that user.
+
+For ADK chat mode, each conversation is a real UUID session, so it gets a normal registry entry like any plan session.
+
+---
+
+### MongoDB Index Recommendations
+
+```js
+// Primary access pattern — list sessions for a user, newest first
+db.session_registry.createIndex({ "user_id": 1, "updated_at": -1 })
+
+// Filter by framework (for cross-framework dashboards)
+db.session_registry.createIndex({ "user_id": 1, "framework": 1, "status": 1 })
+```
+
+---
+
+### Summary
+
+| | Without Registry | With Registry |
+|---|---|---|
+| List sessions | Deserialise N msgpack blobs | Single `find()` query |
+| Mode on refresh | Lost on every refresh | Always in registry |
+| Cross-framework list | Not possible | One collection, one query |
+| Active session count | Count distinct thread_ids | `countDocuments({status: "active"})` |
+| Session status | Derived from framework state | Explicit field, always accurate |
+| Framework swap | Break all queries | Change `framework` field, query unchanged |
+| Created-at timestamp | Buried in binary (LangGraph) | Always present, always indexed |
+
+---
+
+## 14. Long-running Task Resilience: SSE Disconnect Behaviour
+
+The question: *if an agent is mid-execution and the user refreshes the page (SSE connection drops), what happens to the running task?*
+
+The answer depends on the framework **and** which endpoint is serving the request.
+
+---
+
+### How execution is coupled to the HTTP connection
+
+Both frameworks run execution code inside `async` generator functions consumed by FastAPI's `StreamingResponse`. The critical question is whether the task **dies** or **survives** when the client drops.
+
+```
+                  HTTP connection alive             HTTP connection dropped
+                  ───────────────────────           ──────────────────────
+FastAPI           consumes generator                stops consuming generator
+async generator   yields events                     generator receives no more .send()
+astream/run_async keeps executing (producer)        ??? ← this is the key question
+```
+
+**The answer**: asyncio does **not** automatically cancel a producer coroutine just because its consumer stops reading. Unless code explicitly checks for disconnection and raises `CancelledError`, execution keeps running.
+
+---
+
+### LangGraph — execution survives disconnect (all modes)
+
+`stream_graph()`, `stream_session()`, and `chat_stream()` in `react_agent.py` all follow the same pattern — `self._graph.astream()` runs **inside** the async generator:
+
+```python
+async def stream_graph(self, session_id, initial_state, config):
+    async for chunk in self._graph.astream(initial_state, config, stream_mode="updates"):
+        # process chunk ...
+        yield event   # ← FastAPI stops pulling here on disconnect
+                      #   BUT astream() is not cancelled — it keeps going
+```
+
+When the client disconnects:
+1. FastAPI stops pulling from the generator
+2. `astream()` is still running — it continues executing graph nodes
+3. `MongoDBSaver` writes a checkpoint after **every node completes**
+4. The graph runs to completion (or errors), then the coroutine exits naturally
+
+No explicit disconnect handling exists — no `request.is_disconnected()`, no `try/finally` cleanup, no `asyncio.create_task()`. Background execution is *accidental*: asyncio keeps the coroutine alive until it completes.
+
+**After the user reconnects:**
+```
+GET /sessions/{session_id}         → reads latest checkpoint from MongoDB
+GET /sessions/{session_id}/execute → resumes from latest checkpoint if not done
+```
+
+Because every node is checkpointed, the graph can resume exactly where it left off — or the user finds it already completed.
+
+---
+
+### ADK — behaviour depends on the endpoint type
+
+**Chat mode (SSE — `POST /sessions/{id}/chat/stream`):**
+
+`chat_stream()` yields events from `runner.run_async()` inside the SSE generator. When the client disconnects, FastAPI closes the generator, which propagates an exception **into** `runner.run_async()` and terminates it mid-turn:
+
+```python
+async def chat_stream(self, session_id, user_id, message, auth_token):
+    async for event in self._chat_runner.run_async(...):
+        yield event   # ← generator closed on disconnect
+                      #   run_async() receives GeneratorExit → execution stops
+```
+
+- **Execution stops immediately**
+- Partial turn is lost — `MongodbSessionService.append_event()` skips `partial=True` events, so nothing in-progress is saved to `adk_events`
+- The last *fully completed* turn's events are preserved
+- **User must resend the message to get a response**
+
+**Plan mode (blocking HTTP — `POST /sessions/{id}/execute-all` and `execute-step`):**
+
+These are regular `async def` endpoints returning a JSON body — **not SSE**. Client disconnect has zero effect on server execution:
+
+```python
+@router.post("/sessions/{session_id}/execute-all")
+async def execute_all_steps_endpoint(session_id, ...):
+    result = await adk_agent.execute_all_steps(session_id, auth_token=token)
+    return result   # runs to completion regardless of whether client is still connected
+```
+
+- **Execution always completes** on the server
+- Results saved to `adk_sessions.state` via `output_key` per step
+- After reconnect: `GET /sessions/{id}` returns the full updated state with all step results
+
+---
+
+### Behaviour matrix
+
+| Scenario | LangGraph | ADK |
+|---|---|---|
+| **Chat SSE — user refreshes mid-message** | Execution **continues**; last checkpoint preserved | Execution **stops** mid-turn; partial work lost |
+| **Plan generation SSE — user refreshes** | Execution **continues**; all nodes checkpointed | N/A — plan uses blocking HTTP POST, not SSE |
+| **Plan execution — user refreshes** | Execution **continues**; every step checkpointed | Execution **continues** (blocking HTTP); results saved |
+| **Partial work preserved?** | ✅ Yes — per-node MongoDB checkpoints | ❌ Chat: No. ✅ Plan: Yes — per-step `adk_sessions.state` |
+| **Reconnect & resume?** | ✅ `GET /sessions/{id}/execute` resumes from checkpoint | ✅ Plan: `GET /sessions/{id}` shows results. ❌ Chat: resend |
+| **Disconnect detected?** | ❌ No — `request.is_disconnected()` not called | ❌ No |
+
+---
+
+### The production-grade approach
+
+Current behaviour is workable but has two problems:
+
+1. **Orphaned LangGraph executions** — if the user navigates away permanently, the graph keeps consuming Vertex AI quota with no listener.
+2. **ADK chat is fragile** — a single network hiccup mid-message loses the entire turn.
+
+**The fix: decouple execution from the HTTP connection.**
+
+Execution should be a true background task. The SSE stream becomes a *status feed* that any client can subscribe to and re-subscribe to at any time:
+
+```
+Client                      FastAPI                    Background worker
+  │                            │                              │
+  │  POST /sessions/{id}/exec  │                              │
+  │ ──────────────────────────►│  asyncio.create_task() ─────►│ runs pipeline
+  │ ◄── 202 {status:"running"} │                              │ writes events
+  │                            │                              │   to MongoDB
+  │  GET /sessions/{id}/stream │                              │
+  │ ──────────────────────────►│  tail MongoDB events ───────►│
+  │ ◄══ SSE (progress) ════════│                              │
+  │                            │                              │
+  │  [user refreshes]          │                              │
+  │                            │                              │
+  │  GET /sessions/{id}/stream │                              │
+  │ ──────────────────────────►│  replay from last_event_id ►│
+  │ ◄══ SSE (resumes) ═════════│                              │
+```
+
+**Minimal implementation — `asyncio.create_task()` (same process):**
+
+```python
+# Task registry — maps session_id to running asyncio.Task
+_running_tasks: dict[str, asyncio.Task] = {}
+
+@router.post("/sessions/{session_id}/execute-all")
+async def start_execution(session_id: str, ...):
+    """Start pipeline in background — return immediately."""
+    task = asyncio.create_task(
+        adk_agent.execute_all_steps(session_id, auth_token=token)
+    )
+    _running_tasks[session_id] = task
+    task.add_done_callback(lambda _: _running_tasks.pop(session_id, None))
+    return {"status": "running", "session_id": session_id}
+
+@router.get("/sessions/{session_id}/status")
+async def get_status(session_id: str, ...):
+    """Reconnect-safe status check — reads MongoDB, not the stream."""
+    state = await adk_agent.get_session_state(session_id)
+    return {**state, "is_running": session_id in _running_tasks}
+```
+
+**Scalability options:**
+
+| Requirement | Solution |
+|---|---|
+| Task survives client disconnect | `asyncio.create_task()` — same process, immediate |
+| Task survives server restart | ARQ + Redis, Celery, or similar task queue |
+| SSE stream resumable from any point | Write events to MongoDB as they emit; SSE endpoint replays from `after_event_id` |
+| Cancel a stuck task | `_running_tasks[session_id].cancel()` via a `DELETE /sessions/{id}/task` endpoint |
+| Multiple server instances | Redis-backed task queue + shared MongoDB event log |
+
+---
+
+## 15. Implementing Long-running Tools
+
+Tools that take minutes (PDF parsing, batch processing, external API jobs) need special handling so the agent doesn't block or time out waiting.
+
+**Production pattern:** Submit work to a Celery queue, pause the agent immediately, let the worker complete in the background, then resume via a callback to a `/resume` endpoint.
+
+---
+
+### What happens to the SSE stream when a tool is submitted to Celery
+
+The stream **closes cleanly** — it does not hang. Here is the exact sequence:
+
+```
+Client SSE stream               runner / graph              Celery worker
+─────────────────────           ────────────────────        ──────────────────
+stream open
+                                agent calls tool()
+                                  .delay() → Redis (~1ms)
+                                  returns {pending, job_id}
+                                framework detects long-running tool
+                                yields interrupted event ──► client receives it
+                                generator ENDS
+stream closes naturally ◄───    SSE generator exhausted     task running...
+                                                            task completes
+                                                            POST /resume ◄───
+new runner.run_async() ◄────────────────────────────────────────────────────
+  invocation_id=saved_id
+agent resumes
+```
+
+The Celery worker and the HTTP stream are completely decoupled from the moment `.delay()` is called. The only way to hang is if the tool function does blocking work before returning (e.g. calling `.get()` instead of `.delay()`).
+
+---
+
+### ADK — `LongRunningFunctionTool` + Celery
+
+Three things needed:
+1. Wrap the slow function with `LongRunningFunctionTool(fn)`
+2. Enable `ResumabilityConfig` on the `App`
+3. On the API side: start → store `invocation_id` → Celery worker completes → resume
+
+```python
+from celery import Celery
+from google.adk.tools import LongRunningFunctionTool
+from google.adk.apps import App, ResumabilityConfig
+from google.adk.runners import Runner
+
+celery_app = Celery("jobs", broker="redis://redis:6379/0", backend="redis://redis:6379/0")
+
+# ── 1. Celery task — runs in a worker process ─────────────────────────────────
+@celery_app.task
+def parse_pdfs_task(files: list[str], session_id: str, user_id: str):
+    """Worker: does the actual heavy lifting. Calls /resume when done."""
+    result = _do_actual_pdf_parsing(files)   # blocking, takes minutes
+
+    # Retrieve invocation_id that was saved when ADK paused the agent
+    state = get_session_state(session_id)
+    invocation_id = state["pending_invocation_id"]
+
+    import httpx
+    httpx.post(
+        f"http://api/sessions/{session_id}/resume",
+        json={"user_id": user_id, "result": result, "invocation_id": invocation_id},
+    )
+
+# ── 2. LongRunningFunctionTool function — just submits to queue ───────────────
+async def parse_pdfs(files: list[str], auth_token: str) -> dict:
+    """Submit to Celery queue. Returns pending immediately."""
+    task = parse_pdfs_task.delay(files, session_id, user_id)   # ~1ms
+    return {"status": "pending", "job_id": task.id}
+
+parse_tool = LongRunningFunctionTool(parse_pdfs)
+# Framework auto-appends to description: "NOTE: Do not call again if pending"
+
+# ── 3. App with ResumabilityConfig ────────────────────────────────────────────
+app = App(
+    name="adk_demo",
+    root_agent=LlmAgent(model=..., tools=[parse_tool]),
+    resumability_config=ResumabilityConfig(is_resumable=True),
+)
+runner = Runner(app=app, session_service=session_service)
+```
+
+**API side — capture `invocation_id`, expose resume endpoint:**
+
+```python
+# chat_stream(): ADK pauses → save invocation_id so the Celery worker can find it
+async for event in runner.run_async(...):
+    if event.interrupted:
+        _update_session_state(session_id, {
+            "pending_invocation_id": event.invocation_id
+        })
+    yield event
+# ← generator ends here; stream closes cleanly
+
+# Worker POSTs here when job is done
+@router.post("/sessions/{session_id}/resume")
+async def resume_invocation(session_id: str, body: dict, ...):
+    state = get_session_state(session_id)
+    invocation_id = state["pending_invocation_id"]
+    async for event in runner.run_async(
+        user_id=body["user_id"],
+        session_id=session_id,
+        invocation_id=invocation_id,
+        new_message=Content(role="tool", parts=[Part.from_text(json.dumps(body["result"]))]),
+    ):
+        ...  # collect or stream back to client (via WebSocket, push notification, etc.)
+```
+
+---
+
+### LangGraph — `interrupt()` + `Command(resume=...)` + Celery
+
+LangGraph has no `LongRunningFunctionTool` class. The equivalent is the **`interrupt()` + `Command(resume=...)` pattern** — the same mechanism already used for plan approval in this project. Only the trigger changes: instead of a user click, it's a Celery callback.
+
+```python
+from celery import Celery
+from langgraph.types import interrupt, Command
+
+celery_app = Celery("jobs", broker="redis://redis:6379/0", backend="redis://redis:6379/0")
+
+# ── 1. Celery task — runs in a worker process ─────────────────────────────────
+@celery_app.task
+def parse_pdfs_task(files: list[str], session_id: str):
+    """Worker: does actual work. Calls /resume when done."""
+    result = _do_actual_pdf_parsing(files)
+
+    import httpx
+    httpx.post(
+        f"http://api/sessions/{session_id}/resume",
+        json={"result": result},
+    )
+
+# ── 2. Graph node — submits job and pauses ────────────────────────────────────
+async def parse_pdfs_node(state: AgentState):
+    files = state["files_to_parse"]
+    session_id = state["session_id"]
+
+    # Submit to Celery — returns immediately (~1ms)
+    task = parse_pdfs_task.delay(files, session_id)
+
+    # Pause graph here — full state checkpointed to MongoDB
+    result = interrupt({"job_id": task.id, "status": "waiting"})
+    # ^^^ resumes here when Command(resume=result) is called
+
+    return {"parsed_data": result, "status": "parsing_complete"}
+```
+
+**Wire into the graph:**
+
+```python
+builder = StateGraph(AgentState)
+builder.add_node("parse_pdfs", parse_pdfs_node)
+builder.add_edge("dispatch", "parse_pdfs")
+builder.add_edge("parse_pdfs", "next_step")
+
+graph = builder.compile(
+    checkpointer=MongoDBSaver(...),
+    # parse_pdfs node auto-interrupts via interrupt() — no extra config needed
+)
+```
+
+**API side — resume endpoint (identical pattern to plan approval):**
+
+```python
+# Worker POSTs here when job is done
+@router.post("/sessions/{session_id}/resume")
+async def resume_graph(session_id: str, body: dict, ...):
+    config = {"configurable": {"thread_id": session_id}}
+    await graph.ainvoke(Command(resume=body["result"]), config)
+    return {"status": "resumed"}
+```
+
+**Why this is identical to plan approval:**
+
+```
+# Plan approval (already in project):
+#   user approves → graph.ainvoke(Command(resume={"approved": True}), config)
+
+# Long-running tool:
+#   Celery worker done → graph.ainvoke(Command(resume=job_result), config)
+```
+
+Same API call. Only the trigger differs.
+
+---
+
+### What the client sees on the stream
+
+```
+event: tool_call    → {"tool": "parse_pdfs", "args": {"files": [...]}}
+event: tool_result  → {"status": "pending", "job_id": "abc123"}
+event: interrupted  → {"invocation_id": "xyz", "pending": true}   ← ADK only
+[stream closes]
+```
+
+The client must detect the interrupted/pending state and either:
+- Poll `GET /sessions/{id}/status` until the Celery callback fires
+- Or receive a push notification (WebSocket, FCM, etc.) when the worker calls `/resume`
+
+---
+
+### Comparison
+
+| | ADK | LangGraph |
+|---|---|---|
+| **Pause mechanism** | `LongRunningFunctionTool` — tool returns pending, framework pauses | `interrupt()` inside node — explicit pause point |
+| **Enable** | `App(resumability_config=ResumabilityConfig(is_resumable=True))` | Already enabled via `MongoDBSaver` checkpointer |
+| **State saved by** | `ResumabilityConfig` stores invocation state | `MongoDBSaver` — same durability as plan approval |
+| **Celery task sends** | `session_id` → worker looks up stored `invocation_id` from session state | `session_id` directly — no extra lookup needed |
+| **Resume call** | `runner.run_async(invocation_id=..., new_message=result)` | `graph.ainvoke(Command(resume=result), config)` |
+| **SSE stream on submit** | Closes cleanly after `event.interrupted` | Closes cleanly after `interrupt()` event |
+| **Already in project?** | Not yet | Partially — `interrupt()` used for plan approval; same resume API |
+| **Celery already in project?** | No — add `celery[redis]` dep if Redis infra exists | No — same |
+
+---
+
+## 16. How MCP Requests Are Authenticated
+
+The token travels from the user's browser to the MCP server via two different mechanisms depending on which framework is in play.
+
+---
+
+### LangGraph — token via HTTP header (clean path)
+
+The token is injected once at client creation and carried as an `Authorization: Bearer` header on every MCP request automatically.
+
+```
+User JWT
+  │
+  ▼
+create_mcp_client(token)                    ← app/mcp/client.py:21
+  MultiServerMCPClient({
+    "main": {
+      "transport": "streamable_http",
+      "url": ".../mcp",
+      "headers": {"Authorization": "Bearer <jwt>"}   ← injected here
+    }
+  })
+  │
+  │  every MCP request carries the header
+  ▼
+MCP Server /mcp (FastMCP streamable-http)
+  _get_auth_token(ctx)                      ← mcp-server/src/server.py:28
+    request = get_http_request()            ← FastMCP pulls the Starlette request
+    return request.headers["authorization"][7:]   ← strips "Bearer "
+  │
+  ▼
+Backend API  ← validates JWT on every call; MCP server does NO independent validation
+```
+
+---
+
+### ADK — token via LLM instruction (workaround)
+
+ADK's `MCPToolset` / `StreamableHTTPConnectionParams` has no `headers=` parameter. The token cannot be injected at connection time. Instead it travels through the LLM's prompt:
+
+```
+User JWT
+  │
+  ▼
+chat_stream() / _build_step_instruction()   ← adk_agent.py:346, 709
+  full_message = f'[System context: use auth_token="{auth_token}" for all tool calls]'
+  │
+  │  LLM reads instruction, includes auth_token in every tool call argument
+  ▼
+LlmAgent → tools/call:
+  {"name": "list_items", "arguments": {"auth_token": "<jwt>", skip: 0, limit: 100}}
+                                          ↑ regular tool parameter
+  │
+  ▼
+MCP Server /mcp
+  _extract_token_from_context(ctx) or auth_token   ← adk/mcp-server/src/server.py:99
+  (header attempt fails → falls back to auth_token argument)
+  │
+  ▼
+Backend API
+```
+
+The `/message` JSON-RPC endpoint (used by plan mode direct calls) adds an extra validation step: it calls `GET /auth/me` against the backend before proceeding (`validate_token()` in `adk/mcp-server/src/app.py:76`). The native `/mcp` streamable-http endpoint does not — it relies on the backend to reject invalid tokens.
+
+---
+
+### Side-by-side comparison
+
+| | LangGraph | ADK |
+|---|---|---|
+| **Token transport to MCP** | HTTP `Authorization: Bearer` header — set once at client creation | Tool argument `auth_token=<jwt>` — LLM passes it in every call |
+| **Who injects the token** | `create_mcp_client(token)` in `client.py` | `chat_stream()` / `_build_step_instruction()` prepend it into the prompt |
+| **MCP server extraction** | `request.headers.get("authorization")` via FastMCP `get_http_request()` | `_extract_token_from_context(ctx) or auth_token` — header first, param fallback |
+| **Token validation in MCP layer** | None — backend validates on every API call | `/message` endpoint calls `GET /auth/me` upfront; native `/mcp` delegates to backend |
+| **Risk** | Clean — token never visible to LLM | Token appears in LLM context and potentially in logs; LLM could omit it |
+| **Why the difference** | `MultiServerMCPClient` accepts `headers=` | `MCPToolset`/`StreamableHTTPConnectionParams` has no `headers=` param |
+
+---
+
+## 17. Token Generation from User Identity
+
+### The problem
+
+Agent tasks and MCP tool calls need a valid JWT. Using the user's login token directly has a key weakness: login tokens expire (30-minute default), and a long-running session — or a resumed Celery task — will hit a 401 mid-execution.
+
+### How the POC solves it
+
+**Mechanism: server-side token minting without credentials**
+
+The backend holds a secret key and can sign a JWT for any user identity it already knows about. No password is needed — the server trusts itself:
+
+```
+Normal login:
+  credentials → verify against DB → mint token
+
+Internal token generation:
+  user_id + role → (skip credential check) → mint token
+                        ↑
+              trusted because the call is server-side
+```
+
+**`create_mcp_token()` — fresh token per API action** ([app/auth/authorization.py:179](app/auth/authorization.py#L179))
+
+```python
+async def create_mcp_token(user: TokenData, expires_minutes: int = 60) -> str:
+    return create_access_token(
+        user_id=user.user_id,
+        username=user.username,
+        role=user.role,
+        expires_delta=timedelta(minutes=expires_minutes)
+    )
+```
+
+Called at every user-triggered action — session create, plan approval, replan, retry. A fresh 60-minute token is minted from the validated `current_user` each time, then embedded in the graph state / agent instruction for that execution window.
+
+```python
+# streaming.py:80, agent_routes.py:62, 281, 361
+mcp_token = await create_mcp_token(current_user)   # fresh 60-min token
+session_id = orchestrator.create_session(..., token=mcp_token)
+```
+
+**`POST /auth/token/generate` — programmatic token from user_id** ([app/api/auth_routes.py:89](app/api/auth_routes.py#L89))
+
+```python
+@router.post("/token/generate")   # ← no Depends(get_current_user) — unprotected
+async def generate_token(request: TokenRequest):
+    # TokenRequest: user_id, username, role, expires_minutes
+    return await authorization_tool.generate_user_token(...)
+```
+
+Intended for internal services (Celery workers, background tasks) that need a token without a user session. No existing token or password required — just a `user_id`, `username`, and `role`.
+
+**Token expiry settings:**
+
+| Token | Default expiry | Configured in |
+|---|---|---|
+| User login token | 30 min | `JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30` in `.env` / `docker-compose.yml` |
+| MCP / agent token | 60 min | `create_mcp_token(expires_minutes=60)` default |
+| Token blacklist TTL | 3600 sec | `revoke_token(ttl_seconds=3600)` |
+
+**The remaining gap:** the `mcp_token` is embedded in graph state at session creation time. If execution is paused (user approval, Celery task) and resumed after 60 minutes, the stored token is expired. The fix is to mint a fresh token at each resume/execute interaction — the same pattern already used for approval and replan endpoints.
+
+---
+
+### Does this pattern work with Django and AWS Cognito?
+
+#### Django — yes, maps directly
+
+Django's user model is just a database record. JWT minting is framework-agnostic. The same pattern works:
+
+```python
+from django.contrib.auth.models import User
+import jwt
+from datetime import datetime, timedelta
+
+def generate_token_for_user(user: User, expires_minutes=60) -> str:
+    payload = {
+        "sub": str(user.id),
+        "username": user.username,
+        "role": get_user_role(user),   # your own group/flag mapping
+        "exp": datetime.utcnow() + timedelta(minutes=expires_minutes),
+        "iat": datetime.utcnow(),
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
+
+# From a Celery task or internal endpoint:
+user = User.objects.get(id=user_id)
+token = generate_token_for_user(user, expires_minutes=120)
+```
+
+If using **`djangorestframework-simplejwt`**, it already has a built-in equivalent:
+
+```python
+from rest_framework_simplejwt.tokens import RefreshToken
+
+# No password needed — just a User object
+refresh = RefreshToken.for_user(user)
+access_token = str(refresh.access_token)
+```
+
+`RefreshToken.for_user(user)` is the Django equivalent of `create_mcp_token()`. It's a standard pattern used in Django for SSO callbacks, email verification tokens, agent tasks, and any server-initiated token generation.
+
+---
+
+#### AWS Cognito — fundamentally different; pattern does NOT transfer directly
+
+The POC uses **symmetric JWT (HS256)** — one shared secret, server signs and verifies. Cognito uses **asymmetric JWT (RS256)** — Cognito holds the private key, you only get the public key.
+
+```
+POC / Django (HS256):            AWS Cognito (RS256):
+─────────────────────────        ──────────────────────────────────
+One secret key                   RSA key pair; private key stays in Cognito
+Anyone with secret can sign      Only Cognito's servers can sign
+You control claims & expiry      Cognito controls token structure
+```
+
+**You cannot mint a Cognito-signed token from user_id.** Cognito's public key is at `cognito-idp.{region}.amazonaws.com/{pool}/.well-known/jwks.json` but the private key never leaves AWS.
+
+**Options with Cognito:**
+
+| Approach | How | Tradeoff |
+|---|---|---|
+| **`AdminInitiateAuth`** | Server-side login with `ADMIN_USER_PASSWORD_AUTH` flow — returns Cognito tokens without browser redirect | Needs user password stored server-side |
+| **Store refresh token** | At login, store Cognito's 30-day refresh token in MongoDB; exchange for fresh access token before each task | Refresh tokens are sensitive; revocation risk if leaked |
+| **Client Credentials flow** | Machine-to-machine OAuth2 — returns a service token, not user-scoped | Loses user identity in the token |
+| **Hybrid internal JWT** | Cognito handles user-facing auth; at the API boundary extract `sub` (Cognito user_id) and mint your own HS256 token for internal service calls | Two auth systems to maintain, but solves the problem cleanly |
+
+**Recommended for Cognito — hybrid approach:**
+
+```
+Browser ──► API Gateway ──► [validate Cognito token, extract sub]
+                                         │
+                                         ▼
+                               your backend mints internal HS256 JWT
+                               using sub (Cognito user_id) + role from your DB
+                                         │
+                                Celery worker / MCP call / agent task
+```
+
+This is identical to what the POC does — Cognito just handles the initial user-facing authentication, and your backend takes over for the internal service layer.
+
+---
+
+### Summary
+
+| | HS256 (this POC) | Django simplejwt | AWS Cognito |
+|---|---|---|---|
+| **Mint token from user_id?** | Yes — sign with secret | Yes — `RefreshToken.for_user(user)` | No — only Cognito can sign Cognito tokens |
+| **No credentials needed?** | Yes | Yes | No (need password or refresh token) |
+| **Token lives where?** | Your server | Your server | Cognito (external) |
+| **Pattern for agent tasks** | `create_mcp_token()` fresh per action | `RefreshToken.for_user(user)` at task start | Store refresh token and exchange; or hybrid internal JWT |

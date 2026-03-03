@@ -44,10 +44,31 @@ async def list_mcp_tools(token: Optional[str] = None) -> List[Dict[str, Any]]:
     return result
 
 
+TOOL_PERMISSIONS = {
+    "create_item": "items:write",
+    "update_item": "items:write",
+    "delete_item": "items:delete",
+    "read_item": "items:read",
+    "list_items": "items:read",
+    "search_items": "items:read",
+}
+
+
 async def call_mcp_tool(tool_name: str, arguments: Dict[str, Any], token: str) -> Dict[str, Any]:
     """Call a specific MCP tool by name. Raises ValueError if tool not found."""
     if not token:
         raise PermissionError("Authorization token required for tool calls")
+
+    # Pre-execution RBAC check — catch permission issues before Pydantic validation
+    from app.auth.authorization import decode_token
+    token_data = decode_token(token)
+    required_permission = TOOL_PERMISSIONS.get(tool_name)
+    if required_permission and token_data.permissions:
+        if required_permission not in token_data.permissions:
+            raise PermissionError(
+                f"Permission denied: {tool_name} requires '{required_permission}' permission. "
+                f"Your role ({token_data.role}) does not have this permission."
+            )
 
     client = create_mcp_client(token)
     tools = await client.get_tools()

@@ -47,6 +47,7 @@ class UserResponse(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: datetime
+    permissions: Optional[List[str]] = None
 
 
 class Token(BaseModel):

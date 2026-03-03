@@ -283,6 +283,9 @@ Respond ONLY with valid JSON, no markdown or explanation.
             # Convert Pydantic model to dict for compatibility
             plan_data = plan_data_obj.model_dump()
             
+            # Repair empty tool_params (Gemini structured output sometimes omits them)
+            plan_data = await self._repair_empty_tool_params(plan_data, goal, session_id)
+            
             # Yield analysis first
             yield {
                 "type": "thinking",
@@ -691,6 +694,72 @@ Respond ONLY with valid JSON.
         text = text.strip()
         import json as _json
         return schema.model_validate(_json.loads(text))
+
+    async def _repair_empty_tool_params(self, plan_data: dict, goal: str, session_id: str) -> dict:
+        """Repair sub-tasks that have a tool but empty tool_params.
+        
+        Gemini's with_structured_output sometimes returns empty tool_params
+        for Dict[str, Any] fields, especially with multiple sub-tasks.
+        This makes a focused AI call to extract the missing parameters.
+        """
+        log = LogContext(logger, session_id=session_id, agent_type="planning")
+        
+        # Collect tool schemas for reference
+        try:
+            tools_info = await list_mcp_tools()
+            tool_schemas = {t["name"]: t.get("inputSchema", {}) for t in tools_info}
+        except Exception:
+            tool_schemas = {}
+        
+        for step in plan_data.get("steps", []):
+            for task in step.get("sub_tasks", []):
+                tool = task.get("tool")
+                params = task.get("tool_params", {})
+                
+                if tool and not params:
+                    log.info(f"🔧 Repairing empty tool_params for task: {task.get('name')}")
+                    
+                    # Get schema for this tool
+                    schema_info = tool_schemas.get(tool, {})
+                    props = schema_info.get("properties", {})
+                    required = schema_info.get("required", [])
+                    param_desc = ", ".join(
+                        f"{k} ({v.get('type', 'any')}{' REQUIRED' if k in required else ''}): {v.get('description', '')}"
+                        for k, v in props.items()
+                    )
+                    
+                    repair_prompt = f"""Extract tool parameters from the task description.
+
+GOAL: {goal}
+TASK: {task.get('name')} — {task.get('description')}
+TOOL: {tool}
+PARAMETERS: {param_desc}
+
+Return ONLY a JSON object with the parameter values. Example:
+{{"name": "actual value", "description": "actual value", "data": {{"key": "value"}}}}
+
+Extract real values from the goal and task description. Do NOT use placeholders."""
+                    
+                    try:
+                        raw = await self._model.ainvoke([HumanMessage(content=repair_prompt)])
+                        text = raw.content if hasattr(raw, 'content') else str(raw)
+                        if isinstance(text, list):
+                            text = "".join(p.get("text", str(p)) if isinstance(p, dict) else str(p) for p in text)
+                        text = text.strip()
+                        if text.startswith("```"):
+                            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+                        if text.endswith("```"):
+                            text = text[:-3]
+                        text = text.strip()
+                        
+                        repaired_params = json.loads(text)
+                        if isinstance(repaired_params, dict) and repaired_params:
+                            task["tool_params"] = repaired_params
+                            log.info(f"✅ Repaired tool_params for {task.get('name')}: {json.dumps(repaired_params)}")
+                    except Exception as e:
+                        log.warning(f"⚠️ Could not repair tool_params for {task.get('name')}: {e}")
+        
+        return plan_data
 
 
 # Global AI service instance
