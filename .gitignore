@@ -94,3 +94,4 @@ frontend/dist/
 *.png
 *.jpeg
 *.jpg
+google-adk/app/.adk/

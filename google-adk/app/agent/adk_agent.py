@@ -30,13 +30,14 @@ MCP tools are fetched from the standalone MCP server at startup via
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.parallel_agent import ParallelAgent
+from google.adk.agents.sequential_agent import SequentialAgent
 from google.adk.runners import Runner
 from google.adk.tools.mcp_tool import MCPToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
@@ -454,7 +455,7 @@ class ADKAgentManager:
         }
 
     async def execute_step(self, session_id: str, auth_token: str = None) -> Dict[str, Any]:
-        """Execute the next pending step in the plan."""
+        """Execute the next pending step using a dynamically-built LlmAgent."""
         doc = self._session_service.sessions_collection.find_one({"_id": session_id})
         if not doc:
             raise ValueError(f"Session {session_id} not found")
@@ -474,44 +475,50 @@ class ADKAgentManager:
 
         step = plan[current_step]
         step["status"] = "in_progress"
-
-        # Persist in_progress status BEFORE execution
         plan[current_step] = step
         self._update_session_state(session_id, {"plan": plan})
 
-        # Ask the chat (executor) agent to carry out this step
-        step_result_text = ""
-        params = step.get("parameters", {})
-        step_instruction = (
-            f"Execute plan step {step['step_id']}: {step['description']} "
-            f"(action: {step['action']})"
+        # Build a single-step executor agent dynamically
+        result_key = f"step_{step['step_id']}_result"
+        executor = LlmAgent(
+            model=settings.gemini_model,
+            name=f"step_{step['step_id']}_executor",
+            instruction=self._build_step_instruction(step, auth_token),
+            tools=[_make_mcp_toolset()],
+            output_key=result_key,
         )
-        if params:
-            step_instruction += f"\nParameters: {json.dumps(params)}"
-        if auth_token:
-            step_instruction += f'\n[System context: use auth_token="{auth_token}" for all tool calls]'
-        async for event in self._chat_runner.run_async(
+
+        runner = Runner(
+            agent=executor,
+            app_name=self.APP_NAME,
+            session_service=self._session_service,
+        )
+
+        async for event in runner.run_async(
             user_id=user_id,
             session_id=session_id,
             new_message=Content(
                 role="user",
-                parts=[Part.from_text(text=step_instruction)],
+                parts=[Part.from_text(text=f"Execute step {step['step_id']}.")],
             ),
         ):
-            if hasattr(event, "content") and event.content:
-                for part in event.content.parts:
-                    if hasattr(part, "text") and part.text:
-                        step_result_text += part.text
+            pass  # result stored via output_key
+
+        # Read result from session state
+        session = await self._session_service.get_session(
+            app_name=self.APP_NAME,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        step_result_text = session.state.get(result_key, "")
 
         step["status"] = "completed"
         step["result"] = {"text": step_result_text}
 
         new_step = current_step + 1
         is_complete = new_step >= len(plan)
-
         plan[current_step] = step
 
-        # Persist completed status
         updates = {
             "plan": plan,
             "current_step": new_step,
@@ -530,18 +537,20 @@ class ADKAgentManager:
         }
 
     async def execute_all_steps(self, session_id: str, auth_token: str = None) -> Dict[str, Any]:
-        """Execute all remaining plan steps, running same-group steps in parallel.
+        """Execute all remaining plan steps using ADK workflow agents.
 
-        Steps are grouped by their ``group`` field (defaults to step index if
-        absent).  Steps within the same group are dispatched concurrently via
-        ``asyncio.gather`` — this is the ADK equivalent of LangGraph's
-        ``Send()`` fan-out pattern.  Groups themselves run sequentially so that
-        later groups can depend on earlier results.
+        Dynamically builds a ``SequentialAgent`` → ``ParallelAgent`` hierarchy
+        at runtime from the plan's ``group`` field.  Steps in the same group
+        run concurrently via ADK's built-in ``ParallelAgent``; groups run
+        sequentially via ``SequentialAgent``.  Each step executor is an
+        ``LlmAgent`` with MCP tools and an ``output_key`` so results flow
+        through session state automatically.
         """
         doc = self._session_service.sessions_collection.find_one({"_id": session_id})
         if not doc:
             raise ValueError(f"Session {session_id} not found")
 
+        user_id = doc["user_id"]
         state = doc.get("state", {})
         plan: List[Dict[str, Any]] = state.get("plan", [])
         current_step: int = state.get("current_step", 0)
@@ -553,34 +562,63 @@ class ADKAgentManager:
                 "status": "completed",
             }
 
-        # Build ordered groups from remaining steps
-        remaining = list(enumerate(plan[current_step:], start=current_step))
-        groups: Dict[int, List[tuple]] = {}
-        for idx, step in remaining:
-            g = step.get("group", idx + 1)  # default: each step is its own group
-            groups.setdefault(g, []).append((idx, step))
+        remaining = plan[current_step:]
+
+        # Build the dynamic agent pipeline and run it
+        pipeline = self._build_execution_pipeline(remaining, auth_token)
+        runner = Runner(
+            agent=pipeline,
+            app_name=self.APP_NAME,
+            session_service=self._session_service,
+        )
+
+        # Mark all remaining steps as in_progress
+        for step in remaining:
+            step["status"] = "in_progress"
+        self._update_session_state(session_id, {"plan": plan})
+
+        # Run the pipeline — a single message triggers the full workflow
+        step_ids = [s["step_id"] for s in remaining]
+        _log.info("Running execution pipeline for steps %s in session %s", step_ids, session_id)
+
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=Content(
+                role="user",
+                parts=[Part.from_text(text="Proceed.")],
+            ),
+        ):
+            pass  # pipeline runs to completion; results stored via output_key
+
+        # Read results from session state (populated by output_key on each executor)
+        session = await self._session_service.get_session(
+            app_name=self.APP_NAME,
+            user_id=user_id,
+            session_id=session_id,
+        )
 
         all_results = []
-        for group_key in sorted(groups.keys()):
-            group_steps = groups[group_key]
+        for idx, step in enumerate(remaining, start=current_step):
+            result_key = f"step_{step['step_id']}_result"
+            result_text = session.state.get(result_key, "")
+            plan[idx]["status"] = "completed"
+            plan[idx]["result"] = {"text": result_text}
+            all_results.append({
+                "session_id": session_id,
+                "step": plan[idx],
+                "current_step": len(plan),
+                "total_steps": len(plan),
+                "is_complete": True,
+                "parallel": step.get("group") is not None,
+            })
 
-            if len(group_steps) == 1:
-                # Single step — run normally
-                result = await self.execute_step(session_id, auth_token=auth_token)
-                all_results.append(result)
-            else:
-                # Multiple steps in same group — run in parallel
-                _log.info(
-                    "Executing group %s in parallel (%d steps) for session %s",
-                    group_key, len(group_steps), session_id,
-                )
-                results = await self._execute_steps_parallel(
-                    session_id, group_steps, auth_token=auth_token,
-                )
-                all_results.extend(results)
-
-            if all_results and all_results[-1].get("is_complete"):
-                break
+        self._update_session_state(session_id, {
+            "plan": plan,
+            "current_step": len(plan),
+            "is_complete": True,
+            "is_planning_mode": False,
+        })
 
         return {
             "session_id": session_id,
@@ -588,107 +626,85 @@ class ADKAgentManager:
             "status": "completed",
         }
 
-    async def _execute_steps_parallel(
-        self,
-        session_id: str,
-        group_steps: List[tuple],
-        auth_token: str = None,
-    ) -> List[Dict[str, Any]]:
-        """Execute multiple plan steps concurrently via asyncio.gather.
+    def _build_execution_pipeline(
+        self, steps: List[Dict[str, Any]], auth_token: str = None
+    ) -> SequentialAgent:
+        """Dynamically build a SequentialAgent with ParallelAgent groups.
 
-        This mirrors LangGraph's ``Send()`` pattern where multiple
-        ``task_executor_node`` instances run in parallel.  Each parallel
-        branch uses its own ``Runner.run_async()`` call against the shared
-        session, and results are aggregated back into the plan state.
+        Given a list of plan steps (each with a ``group`` field), constructs:
+
+            SequentialAgent
+            ├── ParallelAgent (group 1) — if group has multiple steps
+            │     ├── LlmAgent (step executor, output_key="step_1_result")
+            │     └── LlmAgent (step executor, output_key="step_2_result")
+            ├── LlmAgent (group 2)     — if group has single step
+            └── LlmAgent (summary)     — reads all {step_X_result} from state
+
+        Nothing is hardcoded — the hierarchy is generated from the plan at
+        runtime so it adapts to any number of steps and groupings.
         """
-        doc = self._session_service.sessions_collection.find_one({"_id": session_id})
-        if not doc:
-            raise ValueError(f"Session {session_id} not found")
+        # Group steps by their group field
+        groups: Dict[int, List[Dict[str, Any]]] = {}
+        for idx, step in enumerate(steps):
+            g = step.get("group", idx + 1)
+            groups.setdefault(g, []).append(step)
 
-        user_id = doc["user_id"]
-        state = doc.get("state", {})
-        plan: List[Dict[str, Any]] = state.get("plan", [])
+        group_agents = []
+        for group_key in sorted(groups.keys()):
+            group_steps = groups[group_key]
+            step_agents = []
+            for step in group_steps:
+                agent = LlmAgent(
+                    model=settings.gemini_model,
+                    name=f"step_{step['step_id']}_executor",
+                    instruction=self._build_step_instruction(step, auth_token),
+                    tools=[_make_mcp_toolset()],
+                    output_key=f"step_{step['step_id']}_result",
+                )
+                step_agents.append(agent)
 
-        # Mark all steps in this group as in_progress
-        for idx, step in group_steps:
-            plan[idx]["status"] = "in_progress"
-        self._update_session_state(session_id, {"plan": plan})
+            if len(step_agents) == 1:
+                group_agents.append(step_agents[0])
+            else:
+                group_agents.append(ParallelAgent(
+                    name=f"parallel_group_{group_key}",
+                    sub_agents=step_agents,
+                ))
 
-        async def _run_single_step(idx: int, step: Dict[str, Any]) -> Dict[str, Any]:
-            """Execute one step in a parallel group."""
-            params = step.get("parameters", {})
-            instruction = (
-                f"Execute plan step {step['step_id']}: {step['description']} "
-                f"(action: {step['action']})"
-            )
-            if params:
-                instruction += f"\nParameters: {json.dumps(params)}"
-            if auth_token:
-                instruction += f'\n[System context: use auth_token="{auth_token}" for all tool calls]'
+        # Summary agent reads all step results from session state
+        step_summaries = "\n".join(
+            f"- Step {s['step_id']} ({s['description']}): {{step_{s['step_id']}_result}}"
+            for s in steps
+        )
+        summary_agent = LlmAgent(
+            model=settings.gemini_model,
+            name="execution_summary",
+            instruction=f"Summarize the execution results:\n{step_summaries}\n\n"
+                        "Provide a brief summary of what was accomplished.",
+            output_key="execution_summary",
+        )
+        group_agents.append(summary_agent)
 
-            result_text = ""
-            try:
-                async for event in self._chat_runner.run_async(
-                    user_id=user_id,
-                    session_id=session_id,
-                    new_message=Content(
-                        role="user",
-                        parts=[Part.from_text(text=instruction)],
-                    ),
-                ):
-                    if hasattr(event, "content") and event.content:
-                        for part in event.content.parts:
-                            if hasattr(part, "text") and part.text:
-                                result_text += part.text
-            except Exception as exc:
-                _log.exception("Parallel step %s failed for session %s", step["step_id"], session_id)
-                result_text = f"Error: {exc}"
+        return SequentialAgent(
+            name="execution_pipeline",
+            sub_agents=group_agents,
+        )
 
-            return {"idx": idx, "result_text": result_text}
-
-        # Fan-out: dispatch all steps concurrently
-        tasks = [_run_single_step(idx, step) for idx, step in group_steps]
-        parallel_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Fan-in: aggregate results back into plan
-        # Re-read plan from DB (may have been updated by parallel runners)
-        doc = self._session_service.sessions_collection.find_one({"_id": session_id})
-        plan = doc.get("state", {}).get("plan", plan)
-
-        results = []
-        max_idx = 0
-        for pr in parallel_results:
-            if isinstance(pr, Exception):
-                _log.error("Parallel step exception: %s", pr)
-                continue
-            idx = pr["idx"]
-            plan[idx]["status"] = "completed"
-            plan[idx]["result"] = {"text": pr["result_text"]}
-            max_idx = max(max_idx, idx)
-
-        new_step = max_idx + 1
-        is_complete = new_step >= len(plan)
-
-        updates: Dict[str, Any] = {
-            "plan": plan,
-            "current_step": new_step,
-            "is_complete": is_complete,
-        }
-        if is_complete:
-            updates["is_planning_mode"] = False
-        self._update_session_state(session_id, updates)
-
-        for idx, step in group_steps:
-            results.append({
-                "session_id": session_id,
-                "step": plan[idx],
-                "current_step": new_step,
-                "total_steps": len(plan),
-                "is_complete": is_complete,
-                "parallel": True,
-            })
-
-        return results
+    @staticmethod
+    def _build_step_instruction(step: Dict[str, Any], auth_token: str = None) -> str:
+        """Build the instruction for a single step executor agent."""
+        instruction = (
+            f"You have exactly ONE task. Do ONLY this and nothing else:\n"
+            f"Task: {step['description']}\n"
+            f"Tool to use: {step['action']}"
+        )
+        params = step.get("parameters", {})
+        if params:
+            instruction += f"\nParameters (pass these exactly): {json.dumps(params)}"
+        if auth_token:
+            instruction += f'\n[System context: use auth_token="{auth_token}" for all tool calls]'
+        instruction += "\n\nCall the tool once with the given parameters, then report the result. Do NOT perform any other tasks."
+        return instruction
 
     # ------------------------------------------------------------------
     # Internal helpers

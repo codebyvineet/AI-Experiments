@@ -179,7 +179,7 @@ export default function AgentPanel({ token, user }) {
       for (const r of stepResults) {
         setMessages(prev => [...prev, {
           role: 'step_result',
-          step: r.current_step || r.step_number,
+          step: r.step?.step_id || r.current_step || r.step_number,
           result: r.step?.result?.text || r.result || r.message || 'Done'
         }]);
       }
