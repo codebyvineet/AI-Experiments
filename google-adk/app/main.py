@@ -1,9 +1,11 @@
 """Main FastAPI application — Google ADK implementation."""
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.crud import connect_db, disconnect_db
@@ -66,6 +68,20 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(items_router)
 app.include_router(agent_router)
+
+# Serve frontend build if the dist/ directory exists
+_frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+if os.path.isdir(_frontend_dist):
+    from fastapi.responses import FileResponse
+
+    app.mount("/app/assets", StaticFiles(directory=os.path.join(_frontend_dist, "assets")), name="assets")
+
+    @app.get("/app/{rest_of_path:path}")
+    async def serve_spa(rest_of_path: str):
+        """Serve the React SPA — all paths under /app/ return index.html."""
+        return FileResponse(os.path.join(_frontend_dist, "index.html"))
+
+    _log.info("Frontend static files mounted from %s", _frontend_dist)
 
 
 @app.get("/")
