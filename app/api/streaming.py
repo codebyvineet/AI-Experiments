@@ -17,7 +17,7 @@ from app.auth.authorization import get_current_user, get_current_user_with_token
 from app.models import TokenData
 from app.agent.graph import get_orchestrator
 from app.agent.react_agent import chat_stream
-from app.mcp.client import mcp_client
+from app.mcp.client import list_mcp_tools, call_mcp_tool as invoke_mcp_tool
 from app.config.logging_config import get_logger, LogContext
 
 logger = get_logger("streaming")
@@ -522,7 +522,7 @@ async def get_mcp_tools(
     
     try:
         # Get tools from external MCP Server
-        tools = await mcp_client.list_tools(token=credentials.credentials)
+        tools = await list_mcp_tools(token=credentials.credentials)
         
         accessible_tools = []
         for tool in tools:
@@ -552,7 +552,7 @@ async def call_mcp_tool(
     log.info(f"📥 Request: Call MCP tool '{tool_name}'", data={"args": args})
     
     try:
-        result = await mcp_client.call_tool(
+        result = await invoke_mcp_tool(
             tool_name=tool_name,
             arguments=args,
             token=credentials.credentials

@@ -1,12 +1,5 @@
-"""MCP package - Client for external MCP Server.
+"""MCP client package — thin wrappers around langchain-mcp-adapters."""
 
-This package provides the MCP Client for communicating with the
-external MCP Server container via JSON-RPC over HTTP.
+from app.mcp.client import create_mcp_client, list_mcp_tools, call_mcp_tool, mcp_health_check
 
-Architecture:
-  Backend App → MCP Client → HTTP → MCP Server (separate container) → Backend API
-"""
-
-from app.mcp.client import mcp_client, MCPClient, get_mcp_tools_description
-
-__all__ = ["mcp_client", "MCPClient", "get_mcp_tools_description"]
+__all__ = ["create_mcp_client", "list_mcp_tools", "call_mcp_tool", "mcp_health_check"]

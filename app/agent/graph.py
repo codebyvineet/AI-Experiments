@@ -6,8 +6,7 @@ This module builds the complete LangGraph state machine with:
 - Executor: Parallel task execution with Send()
 - Summary: Final result aggregation
 
-Checkpointing uses MongoDB (sync/async supported).
-Redis can be added for hot caching if needed.
+Checkpointing uses MongoDB via LangGraph's MongoDBSaver.
 """
 
 import uuid
@@ -44,7 +43,7 @@ class LangGraphOrchestrator:
     Features:
     - Human-in-the-loop approval via interrupt()
     - Parallel task execution via Send()
-    - Dual checkpointing: Redis (hot) + MongoDB (cold)
+    - MongoDB checkpointing via LangGraph MongoDBSaver
     - SSE streaming support
     
     Architecture:
@@ -70,7 +69,7 @@ class LangGraphOrchestrator:
         log = LogContext(logger)
         log.info("🚀 Initializing LangGraph orchestrator")
         
-        # Setup MongoDB checkpointer directly — no dual-checkpointer needed
+        # Setup MongoDB checkpointer via LangGraph MongoDBSaver
         self._mongo_client = MongoClient(self.settings.mongodb_url)
         self._checkpointer = MongoDBSaver(
             self._mongo_client,

@@ -14,7 +14,7 @@ from typing import Literal
 
 from app.config.settings import get_settings
 from app.config.logging_config import get_logger, LogContext
-from app.mcp.client import mcp_client, get_mcp_tools_description
+from app.mcp.client import call_mcp_tool, list_mcp_tools
 
 logger = get_logger("ai_service")
 
@@ -93,13 +93,13 @@ All operations go through the MCP Server which handles authorization.
 
 
 async def get_dynamic_tools_description() -> str:
-    """Get dynamic tools description from MCP server.
-    
-    This fetches the actual tools available from the external MCP server.
-    Falls back to static description if MCP server is unavailable.
-    """
+    """Get dynamic tools description from MCP server."""
     try:
-        return await get_mcp_tools_description()
+        tools = await list_mcp_tools()
+        return "\n".join(
+            f"- **{t['name']}**: {t.get('description', 'No description')}"
+            for t in tools
+        )
     except Exception as e:
         logger.warning(f"Could not fetch MCP tools, using static description: {e}")
         return get_system_tools_description()
@@ -373,7 +373,7 @@ Respond ONLY with valid JSON, no markdown or explanation.
             
             try:
                 # Call tool via MCP client (external MCP server)
-                mcp_result = await mcp_client.call_tool(task_tool, task_tool_params, token)
+                mcp_result = await call_mcp_tool(task_tool, task_tool_params, token)
                 duration_ms = int((time.time() - start_time) * 1000)
                 
                 # Log MCP result with grepable prefix

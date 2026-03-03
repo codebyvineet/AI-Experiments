@@ -3,26 +3,23 @@
 Uses framework methods exclusively:
 - langgraph.prebuilt.create_react_agent for the ReAct loop
 - langchain_google_vertexai.ChatVertexAI for the LLM
-- langchain_mcp_adapters.client.MultiServerMCPClient for MCP tool binding
+- app.mcp.client.create_mcp_client for MCP tool binding
 
 No custom ReAct logic — the framework handles think→act→observe→respond.
 """
 
-import os
 import json
 from typing import Dict, Any, AsyncGenerator, Optional
 
 from langchain_google_vertexai import ChatVertexAI
 from langgraph.prebuilt import create_react_agent
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from google.oauth2 import service_account
 
 from app.config.settings import get_settings
 from app.config.logging_config import get_logger
+from app.mcp.client import create_mcp_client
 
 logger = get_logger("react_agent")
-
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://mcp-server:8001")
 
 
 def _get_chat_model() -> ChatVertexAI:
@@ -43,18 +40,6 @@ def _get_chat_model() -> ChatVertexAI:
         )
 
     return ChatVertexAI(**kwargs)
-
-
-def _get_mcp_client(token: str) -> MultiServerMCPClient:
-    """Create an MCP client with auth headers for tool binding."""
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    return MultiServerMCPClient({
-        "main": {
-            "transport": "streamable_http",
-            "url": f"{MCP_SERVER_URL}/mcp",
-            "headers": headers,
-        }
-    })
 
 
 async def chat_stream(
@@ -94,7 +79,7 @@ async def chat_stream(
         return
 
     try:
-        async with _get_mcp_client(token) as mcp:
+        async with create_mcp_client(token) as mcp:
             tools = await mcp.get_tools()
             tool_names = [t.name for t in tools]
             logger.info(f"[Chat] Loaded {len(tools)} MCP tools: {tool_names}")
