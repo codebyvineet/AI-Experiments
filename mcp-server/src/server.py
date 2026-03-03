@@ -3,7 +3,7 @@
 This is a clean FastMCP implementation that uses:
 - @mcp.tool decorators for automatic schema generation
 - Native FastMCP framework with streamable-http transport
-- Auth token extraction from HTTP request headers (native) or parameter (JSON-RPC wrapper)
+- Auth token extraction from HTTP request headers via FastMCP Context
 """
 import os
 import logging
@@ -25,8 +25,8 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://app:8000")
 MCP_SERVER_PORT = int(os.getenv("MCP_SERVER_PORT", "8001"))
 
 
-def _extract_token_from_context(ctx: Context) -> str:
-    """Extract auth token from the MCP request's HTTP headers."""
+def _get_auth_token(ctx: Context) -> str:
+    """Extract Bearer token from the HTTP request headers via FastMCP Context."""
     try:
         from fastmcp.server.dependencies import get_http_request
         request = get_http_request()
@@ -35,7 +35,7 @@ def _extract_token_from_context(ctx: Context) -> str:
             return auth_header[7:]
     except Exception:
         pass
-    return ""
+    raise PermissionError("Authorization token required - include 'Authorization: Bearer <token>' header")
 
 
 async def backend_request(
@@ -89,10 +89,9 @@ async def create_item(
     name: str = Field(description="The name of the item (required)"),
     description: str = Field(default="", description="A description of the item"),
     data: dict = Field(default_factory=dict, description="Additional JSON data"),
-    auth_token: str = Field(default="", description="Authorization token (auto-injected)")
 ) -> dict:
     """Create a new item in the database."""
-    token = _extract_token_from_context(ctx) or auth_token
+    token = _get_auth_token(ctx)
     logger.info(f"[create_item] Creating: {name}")
     return await backend_request(
         "POST", "/items/",
@@ -105,10 +104,9 @@ async def create_item(
 async def read_item(
     ctx: Context,
     item_id: str = Field(description="The unique ID of the item to read"),
-    auth_token: str = Field(default="", description="Authorization token (auto-injected)")
 ) -> dict:
     """Read an item from the database by its ID."""
-    token = _extract_token_from_context(ctx) or auth_token
+    token = _get_auth_token(ctx)
     logger.info(f"[read_item] Reading: {item_id}")
     return await backend_request("GET", f"/items/{item_id}", token=token)
 
@@ -120,10 +118,9 @@ async def update_item(
     name: Optional[str] = Field(default=None, description="New name for the item"),
     description: Optional[str] = Field(default=None, description="New description"),
     data: Optional[dict] = Field(default=None, description="New JSON data"),
-    auth_token: str = Field(default="", description="Authorization token (auto-injected)")
 ) -> dict:
     """Update an existing item in the database."""
-    token = _extract_token_from_context(ctx) or auth_token
+    token = _get_auth_token(ctx)
     logger.info(f"[update_item] Updating: {item_id}")
     
     update_data = {}
@@ -141,10 +138,9 @@ async def update_item(
 async def delete_item(
     ctx: Context,
     item_id: str = Field(description="The unique ID of the item to delete"),
-    auth_token: str = Field(default="", description="Authorization token (auto-injected)")
 ) -> dict:
     """Delete an item from the database. This action is permanent."""
-    token = _extract_token_from_context(ctx) or auth_token
+    token = _get_auth_token(ctx)
     logger.info(f"[delete_item] Deleting: {item_id}")
     result = await backend_request("DELETE", f"/items/{item_id}", token=token)
     return {"success": True, "deleted_id": item_id, "result": result}
@@ -155,10 +151,9 @@ async def list_items(
     ctx: Context,
     skip: int = Field(default=0, description="Number of items to skip"),
     limit: int = Field(default=100, description="Maximum items to return"),
-    auth_token: str = Field(default="", description="Authorization token (auto-injected)")
 ) -> dict:
     """List all items in the database with pagination."""
-    token = _extract_token_from_context(ctx) or auth_token
+    token = _get_auth_token(ctx)
     logger.info(f"[list_items] Listing (skip={skip}, limit={limit})")
     items = await backend_request("GET", "/items/", token=token, params={"skip": skip, "limit": limit})
     if isinstance(items, list):
@@ -177,10 +172,9 @@ async def search_items(
     field: str = Field(default="all", description="Field to search: all, name, description, data"),
     limit: int = Field(default=20, description="Maximum results to return"),
     offset: int = Field(default=0, description="Number of results to skip"),
-    auth_token: str = Field(default="", description="Authorization token (auto-injected)")
 ) -> dict:
     """Search items by text query."""
-    token = _extract_token_from_context(ctx) or auth_token
+    token = _get_auth_token(ctx)
     logger.info(f"[search_items] Searching: {query}")
     result = await backend_request(
         "GET", "/items/search",

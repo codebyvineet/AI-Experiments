@@ -42,7 +42,7 @@ class MCPClientWrapper:
         
         return MultiServerMCPClient({
             "main": {
-                "transport": "http",
+                "transport": "streamable_http",
                 "url": f"{self.mcp_server_url}/mcp",
                 "headers": headers
             }
@@ -64,124 +64,47 @@ class MCPClientWrapper:
         
         logger.info("[MCP Client] Fetching tools list")
         
-        try:
-            # Use langchain-mcp-adapters to get tools
-            async with self._create_client(token) as client:
-                langchain_tools = await client.get_tools()
-                
-                # Convert LangChain tools to our format
-                tools = []
-                for tool in langchain_tools:
-                    tools.append({
-                        "name": tool.name,
-                        "description": tool.description,
-                        "inputSchema": tool.args_schema.model_json_schema() if tool.args_schema else {}
-                    })
-                
-                self._tools_cache = tools
-                logger.info(f"[MCP Client] Retrieved {len(tools)} tools")
-                return tools
-                
-        except Exception as e:
-            logger.warning(f"[MCP Client] Failed to get tools via adapter, using fallback: {e}")
-            # Fallback to direct HTTP request
-            return await self._list_tools_fallback(token)
-    
-    async def _list_tools_fallback(self, token: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Fallback method using direct HTTP if adapter fails."""
-        import httpx
-        
-        headers = {}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(f"{self.mcp_server_url}/tools", headers=headers)
-            response.raise_for_status()
-            result = response.json()
-            tools = result.get("tools", [])
+        async with self._create_client(token) as client:
+            langchain_tools = await client.get_tools()
+            
+            # Convert LangChain tools to our format
+            tools = []
+            for tool in langchain_tools:
+                tools.append({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.args_schema.model_json_schema() if tool.args_schema else {}
+                })
+            
             self._tools_cache = tools
+            logger.info(f"[MCP Client] Retrieved {len(tools)} tools via adapter")
             return tools
     
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any], token: str) -> Dict[str, Any]:
-        """Call a tool on the MCP server."""
+        """Call a tool on the MCP server via langchain-mcp-adapters."""
         logger.info(f"[MCP Client] Calling tool: {tool_name}")
         
         if not token:
             raise PermissionError("Authorization token required for tool calls")
         
-        try:
-            # Use langchain-mcp-adapters
-            async with self._create_client(token) as client:
-                langchain_tools = await client.get_tools()
-                
-                # Find the requested tool
-                tool = next((t for t in langchain_tools if t.name == tool_name), None)
-                if not tool:
-                    raise ValueError(f"Unknown tool: {tool_name}")
-                
-                # Execute the tool
-                result = await tool.ainvoke(arguments)
-                
-                # Parse result if it's JSON
-                if isinstance(result, str):
-                    try:
-                        return json.loads(result)
-                    except json.JSONDecodeError:
-                        return {"result": result}
-                return result if isinstance(result, dict) else {"result": result}
-                
-        except Exception as e:
-            logger.warning(f"[MCP Client] Adapter call failed, using fallback: {e}")
-            # Fallback to direct HTTP call
-            return await self._call_tool_fallback(tool_name, arguments, token)
-    
-    async def _call_tool_fallback(self, tool_name: str, arguments: Dict[str, Any], token: str) -> Dict[str, Any]:
-        """Fallback method using direct JSON-RPC if adapter fails."""
-        import httpx
-        import uuid
-        
-        request_body = {
-            "jsonrpc": "2.0",
-            "id": str(uuid.uuid4()),
-            "method": "tools/call",
-            "params": {"name": tool_name, "arguments": arguments}
-        }
-        
-        headers = {"Authorization": f"Bearer {token}"}
-        
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{self.mcp_server_url}/message",
-                json=request_body,
-                headers=headers
-            )
+        async with self._create_client(token) as client:
+            langchain_tools = await client.get_tools()
             
-            if response.status_code == 401:
-                raise PermissionError("Unauthorized - invalid or expired token")
-            if response.status_code == 403:
-                raise PermissionError("Forbidden - insufficient permissions")
+            # Find the requested tool
+            tool = next((t for t in langchain_tools if t.name == tool_name), None)
+            if not tool:
+                raise ValueError(f"Unknown tool: {tool_name}")
             
-            response.raise_for_status()
-            result = response.json()
+            # Execute the tool
+            result = await tool.ainvoke(arguments)
             
-            if "error" in result:
-                error = result["error"]
-                raise Exception(f"MCP Error {error.get('code')}: {error.get('message')}")
-            
-            # Extract content from MCP format
-            mcp_result = result.get("result", {})
-            if "content" in mcp_result:
-                content = mcp_result["content"]
-                if isinstance(content, list) and len(content) > 0:
-                    text_content = next((c["text"] for c in content if c.get("type") == "text"), None)
-                    if text_content:
-                        try:
-                            return json.loads(text_content)
-                        except json.JSONDecodeError:
-                            return {"result": text_content}
-            
-            return mcp_result
+            # Parse result if it's JSON
+            if isinstance(result, str):
+                try:
+                    return json.loads(result)
+                except json.JSONDecodeError:
+                    return {"result": result}
+            return result if isinstance(result, dict) else {"result": result}
     
     async def list_resources(self, token: Optional[str] = None) -> List[Dict[str, Any]]:
         """List available resources from MCP server."""

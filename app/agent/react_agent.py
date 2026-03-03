@@ -50,7 +50,7 @@ def _get_mcp_client(token: str) -> MultiServerMCPClient:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     return MultiServerMCPClient({
         "main": {
-            "transport": "http",
+            "transport": "streamable_http",
             "url": f"{MCP_SERVER_URL}/mcp",
             "headers": headers,
         }
@@ -77,6 +77,11 @@ async def chat_stream(
       {"type": "response",    "message": "..."}
       {"type": "error",       "error": "..."}
     """
+    # TODO: Add conversation history support using LangGraph checkpointer
+    # Currently each message is stateless (N-C2). To fix:
+    # 1. Accept session_id parameter
+    # 2. Create agent with checkpointer=MongoDBSaver(...)
+    # 3. Pass config={"configurable": {"thread_id": session_id}} to astream()
     logger.info(f"[Chat] Starting ReAct chat for user={user_id}: {message[:80]}")
 
     yield {"type": "thinking", "message": "Connecting to MCP tools..."}
@@ -89,77 +94,78 @@ async def chat_stream(
         return
 
     try:
-        mcp = _get_mcp_client(token)
-        tools = await mcp.get_tools()
-        tool_names = [t.name for t in tools]
-        logger.info(f"[Chat] Loaded {len(tools)} MCP tools: {tool_names}")
+        async with _get_mcp_client(token) as mcp:
+            tools = await mcp.get_tools()
+            tool_names = [t.name for t in tools]
+            logger.info(f"[Chat] Loaded {len(tools)} MCP tools: {tool_names}")
 
-        yield {
-            "type": "thinking",
-            "message": f"Loaded {len(tools)} tools: {', '.join(tool_names)}",
-        }
+            yield {
+                "type": "thinking",
+                "message": f"Loaded {len(tools)} tools: {', '.join(tool_names)}",
+            }
 
-        # Build the ReAct agent with system prompt to encourage tool usage
-        system_prompt = (
-            "You are a helpful AI assistant with access to a database of items via MCP tools. "
-            "ALWAYS use the available tools to answer questions — do not guess or refuse. "
-            "For questions about items, counts, or data, call list_items or search_items first, "
-            "then analyze the results and give a clear, detailed answer with actual numbers."
-        )
-        agent = create_react_agent(model, tools, prompt=system_prompt)
+            # Build the ReAct agent with system prompt to encourage tool usage
+            system_prompt = (
+                "You are a helpful AI assistant with access to a database of items via MCP tools. "
+                "ALWAYS use the available tools to answer questions — do not guess or refuse. "
+                "For questions about items, counts, or data, call list_items or search_items first, "
+                "then analyze the results and give a clear, detailed answer with actual numbers."
+            )
+            agent = create_react_agent(model, tools, prompt=system_prompt)
 
-        final_response = None
+            final_response = None
 
-        # Stream node-by-node updates from the agent graph
-        async for chunk in agent.astream(
-            {"messages": [("user", message)]},
-            stream_mode="updates",
-        ):
-            for node_name, node_output in chunk.items():
-                messages = node_output.get("messages", [])
-                for msg in messages:
-                    if msg.type == "ai":
-                        # LLM decided something
-                        if hasattr(msg, "tool_calls") and msg.tool_calls:
-                            for tc in msg.tool_calls:
-                                logger.info(f"[Chat] Tool call: {tc['name']}({json.dumps(tc.get('args', {}), default=str)[:200]})")
-                                yield {
-                                    "type": "tool_call",
-                                    "tool": tc["name"],
-                                    "args": tc.get("args", {}),
-                                }
-                        elif msg.content:
-                            # Extract text from content (may be str, list of blocks, etc.)
-                            content = msg.content
-                            if isinstance(content, list):
-                                # Gemini returns list of content blocks
-                                text_parts = []
-                                for part in content:
-                                    if isinstance(part, dict) and "text" in part:
-                                        text_parts.append(part["text"])
-                                    elif isinstance(part, str):
-                                        text_parts.append(part)
-                                final_response = "\n".join(text_parts)
-                            elif isinstance(content, str):
-                                final_response = content
-                            else:
-                                final_response = str(content)
+            # Stream node-by-node updates with recursion limit to prevent infinite loops
+            async for chunk in agent.astream(
+                {"messages": [("user", message)]},
+                stream_mode="updates",
+                config={"recursion_limit": 25},
+            ):
+                for node_name, node_output in chunk.items():
+                    messages = node_output.get("messages", [])
+                    for msg in messages:
+                        if msg.type == "ai":
+                            # LLM decided something
+                            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                for tc in msg.tool_calls:
+                                    logger.info(f"[Chat] Tool call: {tc['name']}({json.dumps(tc.get('args', {}), default=str)[:200]})")
+                                    yield {
+                                        "type": "tool_call",
+                                        "tool": tc["name"],
+                                        "args": tc.get("args", {}),
+                                    }
+                            elif msg.content:
+                                # Extract text from content (may be str, list of blocks, etc.)
+                                content = msg.content
+                                if isinstance(content, list):
+                                    # Gemini returns list of content blocks
+                                    text_parts = []
+                                    for part in content:
+                                        if isinstance(part, dict) and "text" in part:
+                                            text_parts.append(part["text"])
+                                        elif isinstance(part, str):
+                                            text_parts.append(part)
+                                    final_response = "\n".join(text_parts)
+                                elif isinstance(content, str):
+                                    final_response = content
+                                else:
+                                    final_response = str(content)
 
-                    elif msg.type == "tool":
-                        # Tool execution result
-                        result_str = str(msg.content)[:2000] if msg.content else ""
-                        logger.info(f"[Chat] Tool result: {msg.name} -> {result_str[:200]}")
-                        yield {
-                            "type": "tool_result",
-                            "tool": msg.name or "unknown",
-                            "result": result_str,
-                        }
+                        elif msg.type == "tool":
+                            # Tool execution result
+                            result_str = str(msg.content)[:2000] if msg.content else ""
+                            logger.info(f"[Chat] Tool result: {msg.name} -> {result_str[:200]}")
+                            yield {
+                                "type": "tool_result",
+                                "tool": msg.name or "unknown",
+                                "result": result_str,
+                            }
 
-        # Yield the final response
-        if final_response:
-            yield {"type": "response", "message": final_response}
-        else:
-            yield {"type": "response", "message": "No response generated."}
+            # Yield the final response
+            if final_response:
+                yield {"type": "response", "message": final_response}
+            else:
+                yield {"type": "response", "message": "No response generated."}
 
     except Exception as e:
         logger.error(f"[Chat] ReAct agent error: {e}", exc_info=True)
