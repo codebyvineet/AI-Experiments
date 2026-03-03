@@ -59,19 +59,24 @@ Always include auth_token in every tool call."""
 _PLANNER_INSTRUCTION = """You are a planning agent. Given a user goal, produce
 a JSON execution plan as a list of steps.
 
+You have access to MCP tools — use their EXACT names in your plan.
+Do NOT call any tools yourself. Only output a JSON plan that references them.
+
 Each step must be a JSON object with the keys:
   step_id      – a unique identifier (use sequential integers as strings)
   description  – plain-English description of what this step does
-  action       – one of: create_item | read_item | update_item | delete_item |
-                          list_items | analyze | summarize
+  action       – the exact MCP tool name to call, or "analyze"/"summarize" for
+                 reasoning-only steps
+  parameters   – a JSON object of parameters the tool expects (omit for
+                 analyze/summarize steps)
   status       – always set to "pending"
 
 Return ONLY the raw JSON array — no markdown fences, no prose.
 
 Example output:
 [
-  {"step_id": "1", "description": "List all existing items", "action": "list_items", "status": "pending"},
-  {"step_id": "2", "description": "Create a new item called Widget", "action": "create_item", "status": "pending"}
+  {"step_id": "1", "description": "List all existing items", "action": "list_items", "parameters": {}, "status": "pending"},
+  {"step_id": "2", "description": "Create a new item called Widget", "action": "create_item", "parameters": {"name": "Widget", "description": "A new widget"}, "status": "pending"}
 ]"""
 
 
@@ -98,11 +103,17 @@ def _build_chat_agent() -> LlmAgent:
 
 
 def _build_planner_agent() -> LlmAgent:
-    """Build the planner sub-agent (no tools — pure reasoning)."""
+    """Build the planner sub-agent with MCP tool awareness.
+
+    The planner can see MCP tool schemas (names, parameters) so it generates
+    plans that reference real tool names.  The instruction forbids the planner
+    from actually calling tools — it only outputs a JSON plan.
+    """
     return LlmAgent(
         model=settings.gemini_model,
         name="planner_agent",
         instruction=_PLANNER_INSTRUCTION,
+        tools=[_make_mcp_toolset()],
     )
 
 
@@ -148,7 +159,7 @@ class ADKAgentManager:
     # Session lifecycle
     # ------------------------------------------------------------------
 
-    async def create_session(self, user_id: str) -> str:
+    async def create_session(self, user_id: str, mode: str = "chat") -> str:
         """Create a new ADK session and persist metadata to MongoDB."""
         session_id = str(uuid.uuid4())
 
@@ -157,15 +168,37 @@ class ADKAgentManager:
             user_id=user_id,
             session_id=session_id,
             state={
-                "is_planning_mode": False,
+                "is_planning_mode": mode == "plan",
                 "plan": [],
                 "current_step": 0,
                 "is_complete": False,
             },
         )
 
-        await self._save_session_meta(session_id, user_id)
+        await self._save_session_meta(session_id, user_id, mode=mode)
         return session_id
+
+    async def _ensure_adk_session(self, session_id: str, user_id: str) -> None:
+        """Recreate the ADK in-memory session if it was lost (e.g. app restart).
+
+        Plan metadata is stored in MongoDB, so we can always restore enough
+        state for plan execution to continue.  Conversation history is lost
+        (InMemorySessionService limitation) but that is acceptable.
+        """
+        try:
+            await self._session_service.get_session(
+                app_name=self.APP_NAME,
+                user_id=user_id,
+                session_id=session_id,
+            )
+        except Exception:
+            _log.info("Recreating ADK in-memory session %s for user %s", session_id, user_id)
+            await self._session_service.create_session(
+                app_name=self.APP_NAME,
+                user_id=user_id,
+                session_id=session_id,
+                state={},
+            )
 
     async def get_session_state(self, session_id: str) -> Dict[str, Any]:
         """Return the current state of a session."""
@@ -176,6 +209,8 @@ class ADKAgentManager:
         return {
             "session_id": session_id,
             "user_id": meta["user_id"],
+            "mode": meta.get("mode", "chat"),
+            "goal": meta.get("goal", ""),
             "is_planning_mode": meta.get("is_planning_mode", False),
             "plan": meta.get("plan", []),
             "current_step": meta.get("current_step", 0),
@@ -222,7 +257,14 @@ class ADKAgentManager:
         self, session_id: str, user_id: str, message: str, auth_token: str = ""
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Run a chat turn and yield streaming events for the frontend."""
+        await self._ensure_adk_session(session_id, user_id)
         yield {"type": "status", "content": "Connecting to MCP tools..."}
+
+        # Update last_message in MongoDB for sidebar preview
+        await self._update_session_meta(session_id, {
+            "last_message": message[:100],
+            "mode": "chat",
+        })
 
         # Inject auth token into message so the agent can pass it to tools
         full_message = message
@@ -278,6 +320,7 @@ class ADKAgentManager:
             raise ValueError(f"Session {session_id} not found")
 
         user_id = meta["user_id"]
+        await self._ensure_adk_session(session_id, user_id)
 
         # Ask the planner agent to produce the plan
         plan_json = ""
@@ -328,6 +371,8 @@ class ADKAgentManager:
         # Mirror to our own metadata collection for fast API queries
         await self._update_session_meta(session_id, {
             "is_planning_mode": True,
+            "mode": "plan",
+            "goal": goal,
             "plan": plan,
             "current_step": 0,
             "is_complete": False,
@@ -347,6 +392,7 @@ class ADKAgentManager:
             raise ValueError(f"Session {session_id} not found")
 
         user_id = meta["user_id"]
+        await self._ensure_adk_session(session_id, user_id)
         plan: List[Dict[str, Any]] = meta.get("plan", [])
         current_step: int = meta.get("current_step", 0)
 
@@ -361,12 +407,19 @@ class ADKAgentManager:
         step = plan[current_step]
         step["status"] = "in_progress"
 
+        # Persist in_progress status to MongoDB BEFORE execution
+        plan[current_step] = step
+        await self._update_session_meta(session_id, {"plan": plan})
+
         # Ask the chat (executor) agent to carry out this step
         step_result_text = ""
+        params = step.get("parameters", {})
         step_instruction = (
             f"Execute plan step {step['step_id']}: {step['description']} "
             f"(action: {step['action']})"
         )
+        if params:
+            step_instruction += f"\nParameters: {json.dumps(params)}"
         if auth_token:
             step_instruction += f'\n[System context: use auth_token="{auth_token}" for all tool calls]'
         async for event in self._chat_runner.run_async(
@@ -424,7 +477,7 @@ class ADKAgentManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _save_session_meta(self, session_id: str, user_id: str) -> None:
+    async def _save_session_meta(self, session_id: str, user_id: str, mode: str = "chat") -> None:
         """Persist lightweight session metadata to the agent_sessions collection."""
         db = get_db()
         now = datetime.now(timezone.utc)
@@ -434,7 +487,8 @@ class ADKAgentManager:
                 "$setOnInsert": {
                     "session_id": session_id,
                     "user_id": user_id,
-                    "is_planning_mode": False,
+                    "mode": mode,
+                    "is_planning_mode": mode == "plan",
                     "plan": [],
                     "current_step": 0,
                     "is_complete": False,
