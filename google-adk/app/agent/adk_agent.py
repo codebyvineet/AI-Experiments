@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -510,7 +511,7 @@ class ADKAgentManager:
             user_id=user_id,
             session_id=session_id,
         )
-        step_result_text = session.state.get(result_key, "")
+        step_result_text = self._clean_result_text(session.state.get(result_key, ""))
 
         step["status"] = "completed"
         step["result"] = {"text": step_result_text}
@@ -599,18 +600,22 @@ class ADKAgentManager:
         )
 
         all_results = []
+        # Count steps per group to determine which ran in parallel
+        from collections import Counter
+        group_counts = Counter(s.get("group") for s in remaining if s.get("group") is not None)
         for idx, step in enumerate(remaining, start=current_step):
             result_key = f"step_{step['step_id']}_result"
-            result_text = session.state.get(result_key, "")
+            result_text = self._clean_result_text(session.state.get(result_key, ""))
             plan[idx]["status"] = "completed"
             plan[idx]["result"] = {"text": result_text}
+            step_group = step.get("group")
             all_results.append({
                 "session_id": session_id,
                 "step": plan[idx],
                 "current_step": len(plan),
                 "total_steps": len(plan),
                 "is_complete": True,
-                "parallel": step.get("group") is not None,
+                "parallel": step_group is not None and group_counts.get(step_group, 0) > 1,
             })
 
         self._update_session_state(session_id, {
@@ -703,8 +708,22 @@ class ADKAgentManager:
             instruction += f"\nParameters (pass these exactly): {json.dumps(params)}"
         if auth_token:
             instruction += f'\n[System context: use auth_token="{auth_token}" for all tool calls]'
-        instruction += "\n\nCall the tool once with the given parameters, then report the result. Do NOT perform any other tasks."
+        instruction += (
+            "\n\nCall the tool once with the given parameters, then report the result "
+            "in a brief human-readable sentence. Do NOT include raw JSON, tool response "
+            "objects, or code blocks in your answer."
+        )
         return instruction
+
+    @staticmethod
+    def _clean_result_text(text: str) -> str:
+        """Strip raw JSON / code blocks from LLM result text."""
+        # Remove ```json ... ``` blocks
+        cleaned = re.sub(r"```(?:json)?\s*\{.*?```", "", text, flags=re.DOTALL)
+        # Remove any remaining lone JSON objects
+        cleaned = re.sub(r"\{\"(?:create|update|delete|list|get)_\w+\":\s*\{.*", "", cleaned, flags=re.DOTALL)
+        cleaned = cleaned.strip()
+        return cleaned if cleaned else text.strip()
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -151,10 +151,21 @@ export default function AgentPanel({ token, user }) {
     setLoading(true);
     try {
       const data = await executeStep(token, activeSession);
+      const stepNum = data.step?.step_id || data.step_number;
+      // Update single step status in plan message
+      setMessages(prev => prev.map(m => {
+        if (m.role === 'plan') {
+          const updated = (Array.isArray(m.plan) ? m.plan : m.steps || []).map(s =>
+            (s.step_id == stepNum) ? { ...s, status: 'completed' } : s
+          );
+          return { ...m, plan: updated, steps: updated };
+        }
+        return m;
+      }));
       setMessages(prev => [...prev, {
         role: 'step_result',
-        step: data.step_number,
-        result: data.result || data.message
+        step: stepNum,
+        result: data.step?.result?.text || data.result || data.message
       }]);
       if (data.status === 'completed' || data.all_complete) {
         setPlanState(prev => ({ ...prev, status: 'completed' }));
@@ -172,6 +183,14 @@ export default function AgentPanel({ token, user }) {
     try {
       const data = await executeAllSteps(token, activeSession);
       const stepResults = data.execution_results || data.results || [];
+      // Update plan step statuses to completed in the plan message
+      setMessages(prev => prev.map(m => {
+        if (m.role === 'plan') {
+          const updated = (Array.isArray(m.plan) ? m.plan : m.steps || []).map(s => ({ ...s, status: 'completed' }));
+          return { ...m, plan: updated, steps: updated };
+        }
+        return m;
+      }));
       setMessages(prev => [...prev, {
         role: 'system',
         content: `Executed ${stepResults.length} steps. Status: ${data.status}`
@@ -180,7 +199,8 @@ export default function AgentPanel({ token, user }) {
         setMessages(prev => [...prev, {
           role: 'step_result',
           step: r.step?.step_id || r.current_step || r.step_number,
-          result: r.step?.result?.text || r.result || r.message || 'Done'
+          result: r.step?.result?.text || r.result || r.message || 'Done',
+          parallel: r.parallel || false
         }]);
       }
       setPlanState(prev => ({ ...prev, status: 'completed' }));
@@ -411,29 +431,63 @@ function MessageBubble({ msg }) {
   if (msg.role === 'plan') {
     const planSteps = Array.isArray(msg.plan) ? msg.plan : msg.steps || [];
     const planText = typeof msg.plan === 'string' ? msg.plan : '';
+    // Group steps by their group field for parallel visualization
+    const groups = {};
+    planSteps.forEach(s => {
+      const g = s.group ?? 'seq';
+      if (!groups[g]) groups[g] = [];
+      groups[g].push(s);
+    });
+    const groupKeys = Object.keys(groups).sort((a, b) => (a === 'seq' ? 1 : b === 'seq' ? -1 : a - b));
     return (
       <div className="bg-purple-900/20 border border-purple-700/50 rounded-lg px-4 py-3">
         <h4 className="text-purple-300 font-medium mb-2">📋 Plan Generated</h4>
         {planText && <p className="text-sm text-gray-300 mb-2">{planText}</p>}
-        {planSteps.length > 0 && (
-          <ol className="list-decimal list-inside space-y-1">
-            {planSteps.map((s, i) => (
-              <li key={i} className="text-sm text-gray-400">
-                {typeof s === 'string' ? s : s.description || s.action || JSON.stringify(s)}
-                {s.status && <span className={`ml-2 text-xs px-1.5 py-0.5 rounded ${s.status === 'completed' ? 'bg-green-900/50 text-green-400' : 'bg-gray-700 text-gray-400'}`}>{s.status}</span>}
-              </li>
-            ))}
-          </ol>
-        )}
+        {groupKeys.map(gk => {
+          const steps = groups[gk];
+          const isParallel = steps.length > 1;
+          return (
+            <div key={gk} className={`mb-2 ${isParallel ? 'border-l-2 border-yellow-500/60 pl-3' : ''}`}>
+              {isParallel && (
+                <div className="flex items-center gap-1.5 mb-1">
+                  <span className="text-yellow-400 text-xs font-medium">⚡ Parallel Group {gk}</span>
+                  <span className="text-xs text-gray-500">({steps.length} steps run simultaneously)</span>
+                </div>
+              )}
+              <ol className={`list-inside space-y-1 ${isParallel ? '' : 'list-decimal'}`}>
+                {steps.map((s, i) => (
+                  <li key={s.step_id || i} className="text-sm text-gray-400 flex items-center gap-2">
+                    <span className="text-gray-500 text-xs w-5">{s.step_id || i + 1}.</span>
+                    <span>{typeof s === 'string' ? s : s.description || s.action || JSON.stringify(s)}</span>
+                    {s.status && <span className={`text-xs px-1.5 py-0.5 rounded ${s.status === 'completed' ? 'bg-green-900/50 text-green-400' : 'bg-gray-700 text-gray-400'}`}>{s.status}</span>}
+                    {isParallel && s.status !== 'completed' && <span className="text-yellow-500/50 text-xs">⚡</span>}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          );
+        })}
       </div>
     );
   }
 
   if (msg.role === 'step_result') {
+    const text = typeof msg.result === 'string' ? msg.result : JSON.stringify(msg.result);
+    const MAX_LEN = 300;
+    const isLong = text.length > MAX_LEN;
+    const display = isLong && !expanded ? text.slice(0, MAX_LEN) + '…' : text;
     return (
       <div className="bg-green-900/20 border border-green-700/50 rounded-lg px-4 py-2">
-        <div className="text-green-400 text-sm font-medium">Step {msg.step} Result</div>
-        <p className="text-sm text-gray-300 mt-1">{typeof msg.result === 'string' ? msg.result : JSON.stringify(msg.result)}</p>
+        <div className="text-green-400 text-sm font-medium flex items-center gap-2">
+          Step {msg.step} Result
+          {msg.parallel && <span className="text-yellow-400 text-xs bg-yellow-900/30 px-1.5 py-0.5 rounded">⚡ parallel</span>}
+        </div>
+        <p className="text-sm text-gray-300 mt-1 break-words whitespace-pre-wrap">{display}</p>
+        {isLong && (
+          <button onClick={() => setExpanded(e => !e)} className="text-xs text-blue-400 hover:text-blue-300 mt-1 cursor-pointer">
+            {expanded ? '▲ Show less' : '▼ Show more'}
+          </button>
+        )}
       </div>
     );
   }
