@@ -13,6 +13,8 @@ from typing import Dict, Any, AsyncGenerator, Optional
 
 from langchain_google_vertexai import ChatVertexAI
 from langgraph.prebuilt import create_react_agent
+from langgraph.checkpoint.mongodb import MongoDBSaver
+from pymongo import MongoClient
 from google.oauth2 import service_account
 
 from app.config.settings import get_settings
@@ -20,6 +22,19 @@ from app.config.logging_config import get_logger
 from app.mcp.client import create_mcp_client
 
 logger = get_logger("react_agent")
+
+# Lazy-initialized checkpointer for conversation history
+_chat_checkpointer = None
+
+
+def _get_chat_checkpointer() -> MongoDBSaver:
+    """Get or create the MongoDB checkpointer for chat conversation history."""
+    global _chat_checkpointer
+    if _chat_checkpointer is None:
+        settings = get_settings()
+        client = MongoClient(settings.mongodb_url)
+        _chat_checkpointer = MongoDBSaver(client, db_name=settings.mongodb_database)
+    return _chat_checkpointer
 
 
 def _get_chat_model() -> ChatVertexAI:
@@ -62,12 +77,9 @@ async def chat_stream(
       {"type": "response",    "message": "..."}
       {"type": "error",       "error": "..."}
     """
-    # TODO: Add conversation history support using LangGraph checkpointer
-    # Currently each message is stateless (N-C2). To fix:
-    # 1. Accept session_id parameter
-    # 2. Create agent with checkpointer=MongoDBSaver(...)
-    # 3. Pass config={"configurable": {"thread_id": session_id}} to astream()
-    logger.info(f"[Chat] Starting ReAct chat for user={user_id}: {message[:80]}")
+    # Use user_id as thread_id for conversation history (one thread per user)
+    thread_id = f"chat-{user_id}"
+    logger.info(f"[Chat] Starting ReAct chat for user={user_id} thread={thread_id}: {message[:80]}")
 
     yield {"type": "thinking", "message": "Connecting to MCP tools..."}
 
@@ -96,7 +108,10 @@ async def chat_stream(
                 "For questions about items, counts, or data, call list_items or search_items first, "
                 "then analyze the results and give a clear, detailed answer with actual numbers."
             )
-            agent = create_react_agent(model, tools, prompt=system_prompt)
+            agent = create_react_agent(
+                model, tools, prompt=system_prompt,
+                checkpointer=_get_chat_checkpointer(),
+            )
 
             final_response = None
 
@@ -104,7 +119,7 @@ async def chat_stream(
             async for chunk in agent.astream(
                 {"messages": [("user", message)]},
                 stream_mode="updates",
-                config={"recursion_limit": 25},
+                config={"configurable": {"thread_id": thread_id}, "recursion_limit": 25},
             ):
                 for node_name, node_output in chunk.items():
                     messages = node_output.get("messages", [])

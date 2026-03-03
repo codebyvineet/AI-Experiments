@@ -85,12 +85,12 @@ async def stream_chat(
             token=mcp_token,
             user_id=current_user.user_id,
         ):
-            yield f"data: {json.dumps(event)}\n\n"
+            yield event
 
     log.info("📤 Response: Starting SSE stream for chat")
 
     return StreamingResponse(
-        generate(),
+        event_generator(generate()),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -174,13 +174,14 @@ async def stream_plan_generation(
     orchestrator = await get_orchestrator()
     
     # Check if this is a pending session that needs execution
-    pending = _pending_sessions.pop(session_id, None)
+    pending = _pending_sessions.get(session_id)
     
     if pending:
         # Start graph execution with streaming
         log.info(f"🚀 Starting graph execution for pending session")
         
         async def stream_new_plan():
+            _pending_sessions.pop(session_id, None)  # Safe to remove once streaming begins
             async for event in orchestrator.stream_graph(
                 session_id,
                 pending["initial_state"],
@@ -244,16 +245,34 @@ async def update_session_plan(
     current_user: TokenData = Depends(get_current_user)
 ):
     """Update the plan for a session (user modification)."""
-    # Note: LangGraph handles plan updates via interrupt/replan
-    # This endpoint is for backward compatibility
+    log = LogContext(logger, session_id=session_id, user_id=current_user.user_id)
+    log.info("📥 Request: Update plan")
+    
     orchestrator = await get_orchestrator()
     
-    # Use the replan feature
-    mcp_token = await create_mcp_token(current_user)
+    # Verify ownership
+    state = await orchestrator.get_session_state(session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if state.get("user_id") != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
     
+    # Update plan in LangGraph state via aupdate_state
+    config = {"configurable": {"thread_id": session_id}}
+    try:
+        await orchestrator._graph.aupdate_state(
+            config,
+            {"plan": request.plan},
+            as_node="planner"  # Update as if planner produced this plan
+        )
+    except Exception as e:
+        log.error(f"❌ Failed to update plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update plan: {str(e)}")
+    
+    log.info("📤 Response: Plan updated")
     return {
         "session_id": session_id,
-        "message": "Use POST /agent/v2/sessions/{id}/replan for plan modifications",
+        "message": "Plan updated successfully",
         "plan": request.plan
     }
 

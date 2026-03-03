@@ -358,10 +358,8 @@ Respond ONLY with valid JSON, no markdown or explanation.
         
         # List of all available MCP tools
         available_mcp_tools = [
-            "create_item", "read_item", "update_item", "delete_item", "list_items",
-            "search_items", "bulk_create", "bulk_delete", 
-            "get_statistics", "generate_report",
-            "get_user_profile", "update_user_profile"
+            "create_item", "read_item", "update_item", "delete_item",
+            "list_items", "search_items",
         ]
         
         # If a specific MCP tool is specified AND we have a token, execute via MCP client
@@ -431,7 +429,7 @@ Respond ONLY with valid JSON, no markdown or explanation.
                 log.error(f"❌ MCP authorization error: {e}")
                 return {
                     "task_name": task_name,
-                    "status": "failed",
+                    "status": "authorization_failed",
                     "result": f"Authorization error: {str(e)}",
                     "duration_ms": duration_ms
                 }
