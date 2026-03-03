@@ -18,7 +18,7 @@ MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://mcp-server:8001")
 
 
 def create_mcp_client(token: Optional[str] = None) -> MultiServerMCPClient:
-    """Create a MultiServerMCPClient with optional auth. Use as async context manager."""
+    """Create a MultiServerMCPClient with optional auth."""
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     return MultiServerMCPClient({
         "main": {
@@ -31,16 +31,17 @@ def create_mcp_client(token: Optional[str] = None) -> MultiServerMCPClient:
 
 async def list_mcp_tools(token: Optional[str] = None) -> List[Dict[str, Any]]:
     """List available tools from MCP server as plain dicts."""
-    async with create_mcp_client(token) as client:
-        tools = await client.get_tools()
-        return [
-            {
-                "name": t.name,
-                "description": t.description,
-                "inputSchema": t.args_schema.model_json_schema() if t.args_schema else {},
-            }
-            for t in tools
-        ]
+    client = create_mcp_client(token)
+    tools = await client.get_tools()
+    result = []
+    for t in tools:
+        schema = t.args_schema
+        if hasattr(schema, "model_json_schema"):
+            schema = schema.model_json_schema()
+        elif not isinstance(schema, dict):
+            schema = {}
+        result.append({"name": t.name, "description": t.description, "inputSchema": schema})
+    return result
 
 
 async def call_mcp_tool(tool_name: str, arguments: Dict[str, Any], token: str) -> Dict[str, Any]:
@@ -48,20 +49,20 @@ async def call_mcp_tool(tool_name: str, arguments: Dict[str, Any], token: str) -
     if not token:
         raise PermissionError("Authorization token required for tool calls")
 
-    async with create_mcp_client(token) as client:
-        tools = await client.get_tools()
-        tool = next((t for t in tools if t.name == tool_name), None)
-        if not tool:
-            raise ValueError(f"Unknown tool: {tool_name}")
+    client = create_mcp_client(token)
+    tools = await client.get_tools()
+    tool = next((t for t in tools if t.name == tool_name), None)
+    if not tool:
+        raise ValueError(f"Unknown tool: {tool_name}")
 
-        result = await tool.ainvoke(arguments)
+    result = await tool.ainvoke(arguments)
 
-        if isinstance(result, str):
-            try:
-                return json.loads(result)
-            except json.JSONDecodeError:
-                return {"result": result}
-        return result if isinstance(result, dict) else {"result": result}
+    if isinstance(result, str):
+        try:
+            return json.loads(result)
+        except json.JSONDecodeError:
+            return {"result": result}
+    return result if isinstance(result, dict) else {"result": result}
 
 
 async def mcp_health_check() -> Dict[str, Any]:
