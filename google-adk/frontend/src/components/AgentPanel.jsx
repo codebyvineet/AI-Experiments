@@ -16,6 +16,8 @@ export default function AgentPanel({ token, user }) {
 
   useEffect(() => {
     loadSessions();
+    const interval = setInterval(loadSessions, 10000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -25,7 +27,7 @@ export default function AgentPanel({ token, user }) {
   const loadSessions = async () => {
     try {
       const data = await listSessions(token);
-      setSessions(data.sessions || []);
+      setSessions(Array.isArray(data) ? data : data.sessions || []);
     } catch {}
   };
 
@@ -213,20 +215,28 @@ export default function AgentPanel({ token, user }) {
           </button>
         </div>
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {sessions.map(s => (
-            <button
-              key={s.session_id || s.id}
-              onClick={() => loadSession(s.session_id || s.id)}
-              className={`w-full text-left px-3 py-2 rounded text-sm transition-colors ${
-                activeSession === (s.session_id || s.id)
-                  ? 'bg-blue-600/20 text-blue-300'
-                  : 'text-gray-400 hover:bg-gray-700'
-              }`}
-            >
-              <div className="truncate">{s.session_id || s.id}</div>
-              <div className="text-xs text-gray-500">{s.mode || 'chat'}</div>
-            </button>
-          ))}
+          {sessions.map(s => {
+            const sid = s.session_id || s.id;
+            const status = s.is_complete ? 'Complete' : s.is_planning_mode ? 'Planning' : 'Active';
+            const statusColor = s.is_complete ? 'bg-green-600' : s.is_planning_mode ? 'bg-yellow-600' : 'bg-blue-600';
+            return (
+              <button
+                key={sid}
+                onClick={() => loadSession(sid)}
+                className={`w-full text-left px-3 py-2 rounded text-sm transition-colors ${
+                  activeSession === sid
+                    ? 'bg-blue-600/20 text-blue-300'
+                    : 'text-gray-400 hover:bg-gray-700'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-xs truncate">{sid.slice(0, 8)}...</span>
+                  <span className={`${statusColor} text-white text-xs px-1.5 py-0.5 rounded`}>{status}</span>
+                </div>
+                <div className="text-xs text-gray-500 mt-0.5">{s.mode || (s.is_planning_mode ? 'plan' : 'chat')}</div>
+              </button>
+            );
+          })}
           {sessions.length === 0 && (
             <p className="text-gray-500 text-sm text-center py-4">No sessions yet</p>
           )}
