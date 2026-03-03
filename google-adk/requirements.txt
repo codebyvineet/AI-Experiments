@@ -12,6 +12,10 @@ redis>=5.0.1
 # Google ADK (Agent Development Kit) — replaces custom LangGraph agent
 google-adk>=1.0.0
 
+# ADK MongoDB Session Service — framework-native persistent session storage
+# (analogous to LangGraph's MongoDBSaver checkpointer)
+adk-mongodb-session>=1.0.0
+
 # Google Generative AI (Gemini — used by ADK internally)
 google-generativeai>=0.8.0
 

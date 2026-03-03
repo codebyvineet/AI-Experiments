@@ -49,17 +49,36 @@ async def create_session(
 async def list_sessions(
     current_user: TokenData = Depends(get_current_user),
 ):
-    """List all sessions for the current user.  Auth-only."""
-    from app.crud import get_db
-    db = get_db()
-    query = {"user_id": current_user.user_id, "archived": {"$ne": True}}
-    if "agent:admin" in (current_user.permissions or []):
-        query = {"archived": {"$ne": True}}
-    sessions = []
-    async for doc in db.agent_sessions.find(query).sort("created_at", -1):
-        doc.pop("_id", None)
-        sessions.append(doc)
-    return sessions
+    """List all sessions for the current user.  Auth-only.
+
+    Uses the framework's ``MongodbSessionService.list_sessions()`` for the
+    current user.  Admins see all sessions by querying the framework's
+    collection directly (the framework API only supports per-user listing).
+    """
+    is_admin = "agent:admin" in (current_user.permissions or [])
+
+    if is_admin:
+        # Admin: query framework's MongoDB collection directly for all users
+        coll = adk_agent._session_service.sessions_collection
+        sessions = []
+        for doc in coll.find().sort("update_time", -1):
+            state = doc.get("state", {})
+            if state.get("archived"):
+                continue
+            sessions.append({
+                "session_id": doc["_id"],
+                "user_id": doc.get("user_id", ""),
+                "mode": state.get("mode", "chat"),
+                "is_planning_mode": state.get("is_planning_mode", False),
+                "goal": state.get("goal", ""),
+                "last_message": state.get("last_message", ""),
+                "last_update_time": doc.get("update_time").timestamp() if doc.get("update_time") else None,
+            })
+        return sessions
+    else:
+        sessions = await adk_agent.list_sessions(current_user.user_id)
+        # Filter out archived sessions
+        return [s for s in sessions if not s.get("archived")]
 
 
 @router.get("/sessions/{session_id}")
@@ -69,7 +88,7 @@ async def get_session_state(
 ):
     """Get the current state of an agent session.  Auth-only."""
     try:
-        state = await adk_agent.get_session_state(session_id)
+        state = await adk_agent.get_session_state(session_id, user_id=current_user.user_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
@@ -92,7 +111,7 @@ async def archive_session(
 ):
     """Archive a session.  Requires agent:execute."""
     try:
-        return await adk_agent.archive_session(session_id, request.ttl_days)
+        return await adk_agent.archive_session(session_id, user_id=current_user.user_id, ttl_days=request.ttl_days)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
@@ -180,7 +199,7 @@ async def enter_plan_mode(
 ):
     """Enter planning mode: the ADK planner agent generates a JSON plan."""
     try:
-        return await adk_agent.enter_plan_mode(session_id, request.goal)
+        return await adk_agent.enter_plan_mode(session_id, request.goal, user_id=current_user.user_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 

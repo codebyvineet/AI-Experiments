@@ -14,8 +14,9 @@ This document covers the internal mechanics of both frameworks used in this proj
 6. [How State Is Saved (Checkpointing)](#6-how-state-is-saved-checkpointing)
 7. [Saving Custom State at Any Point](#7-saving-custom-state-at-any-point)
 8. [What Requests Are Streamable](#8-what-requests-are-streamable)
-9. [Concurrent Input: What Happens When AI Is Running](#9-concurrent-input-what-happens-when-ai-is-running)
-10. [LangGraph vs Google ADK Side-by-Side](#10-langgraph-vs-google-adk-side-by-side)
+9. [SSE Stream Lifecycle](#85-sse-stream-lifecycle)
+10. [Concurrent Input: What Happens When AI Is Running](#9-concurrent-input-what-happens-when-ai-is-running)
+11. [LangGraph vs Google ADK Side-by-Side](#10-langgraph-vs-google-adk-side-by-side)
 
 ---
 
@@ -42,6 +43,8 @@ LangGraph persists state as **msgpack-serialised blobs** in two MongoDB collecti
   "metadata": "<binary msgpack>"
 }
 ```
+
+> **Why not just JSON?** msgpack does the same job — serialize → store → deserialize. The real difference is LangGraph ships a msgpack codec that already knows how to serialize `HumanMessage`, `AIMessage`, `ToolMessage`, etc. You *could* use JSON, but you'd have to write the encoder/decoder for every LangChain message type yourself. msgpack is just the binary format LangGraph chose to build their pre-built codec on top of.
 
 Once deserialised by `MongoDBSaver.get()`, the checkpoint is a plain Python dict:
 
@@ -78,6 +81,10 @@ Once deserialised by `MongoDBSaver.get()`, the checkpoint is a plain Python dict
 |---|---|
 | Chat (per user, persistent) | `chat-{user_id}` — same thread accumulates all chat history |
 | Plan session (per session) | `{uuid}` — new UUID per goal, isolated from other sessions |
+
+> **Who creates the thread?** Nobody explicitly — `thread_id` is just a string. The first time LangGraph writes a checkpoint with a given `thread_id`, MongoDB creates the document automatically. There is no "create thread" API call.
+> - Chat: `thread_id = f"chat-{user_id}"` constructed in `react_agent.py` before calling `agent.astream()`
+> - Plan: `session_id = str(uuid.uuid4())` in `graph.py`, used directly as `thread_id` in the graph config
 
 **Important quirk — Gemini content format:**
 Gemini returns `AIMessage.content` as a **list of blocks**, not a plain string:
@@ -635,6 +642,147 @@ async def event_generator(events):
 |---|---|---|
 | `"updates"` | Plan streaming, Chat mode | `{node_name: {state_fields_that_changed}}` |
 | `"values"` | Execute mode | Full state snapshot after each node |
+
+---
+
+## 8.5. SSE Stream Lifecycle
+
+### Request types per mode
+
+**Chat mode** — one HTTP request, one stream, one close:
+
+```
+Client                                  FastAPI                              LangGraph
+  │                                        │                                     │
+  │  POST /stream/chat                     │                                     │
+  │  {"message": "how many items?"}        │                                     │
+  │ ─────────────────────────────────────► │                                     │
+  │                                        │  agent.astream(...)                 │
+  │                                        │ ──────────────────────────────────► │
+  │  HTTP 200 text/event-stream opens      │                                     │
+  │ ◄─────────────────────────────────── ──│                                     │
+  │                                        │  ◄── {agent: {messages: [AIMessage(tool_calls)]}}
+  │ ◄── data: {"type":"tool_call",...}      │                                     │
+  │                                        │  ◄── {tools: {messages: [ToolMessage]}}
+  │ ◄── data: {"type":"tool_result",...}   │                                     │
+  │                                        │  ◄── {agent: {messages: [AIMessage(text)]}}
+  │ ◄── data: {"type":"response",...}      │                                     │
+  │                                        │  generator exhausted                │
+  │  HTTP connection closes                │                                     │
+  │ ◄─────────────────────────────────── ──│                                     │
+```
+
+**Plan mode** — two separate HTTP requests, two separate streams:
+
+```
+Client                         FastAPI                    LangGraph graph
+  │                               │                            │
+  │  POST /stream/sessions        │                            │
+  │  {"goal": "..."}              │                            │
+  │ ────────────────────────────► │  creates session_id        │
+  │ ◄── 200 {session_id, ...}     │  (no stream yet)           │
+  │                               │                            │
+  │  GET /sessions/{id}/plan      │                            │
+  │ ────────────────────────────► │  graph.astream(initial)   │
+  │                               │ ─────────────────────────► │
+  │  Stream 1 opens               │                            │  planner node runs
+  │ ◄── data: {"type":"status"..} │ ◄── {planner: {...}}       │
+  │ ◄── data: {"type":"plan_step"}│ ◄── {planner: {...}}  ×N   │
+  │ ◄── data: {"type":"plan_complete"} │                       │  approval node: interrupt()
+  │  Stream 1 closes (graph paused at interrupt)               │  ← graph paused here
+  │                               │                            │
+  │  [user reviews plan]          │                            │
+  │                               │                            │
+  │  GET /sessions/{id}/execute   │                            │
+  │ ────────────────────────────► │  graph.astream(           │
+  │                               │    Command(resume=True))  │
+  │                               │ ─────────────────────────► │  resumes past interrupt
+  │  Stream 2 opens               │                            │  executor runs tasks
+  │ ◄── data: {"type":"step_start"}     ◄── {executor: {...}}  │
+  │ ◄── data: {"type":"task_complete"}  ◄── {aggregator: {..}} │  (×N per step)
+  │ ◄── data: {"type":"execution_complete"}  ◄── {summary: {}} │
+  │  Stream 2 closes              │                            │
+```
+
+---
+
+### How the frontend reads the stream
+
+The frontend uses `fetch()` with the `ReadableStream` API — **not** `EventSource`. This allows passing an `Authorization` header, which `EventSource` does not support.
+
+```javascript
+// In frontend/src/api.js — streamChat()
+const response = await fetch(`${API_BASE}/stream/chat`, {
+    method: 'POST',
+    headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,   // EventSource can't send this
+    },
+    body: JSON.stringify({ message }),
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+let buffer = '';
+
+while (true) {
+    const { done, value } = await reader.read();   // blocks until data arrives
+
+    if (done) break;   // ← stream ended, HTTP connection closed
+
+    buffer += decoder.decode(value, { stream: true });
+
+    // SSE events are delimited by \n\n
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop();   // keep incomplete last chunk
+
+    for (const part of parts) {
+        const line = part.trim();
+        if (line.startsWith('data: ')) {
+            const event = JSON.parse(line.slice(6));
+            handleEvent(event);   // route by event.type
+        }
+    }
+}
+```
+
+**How the stream ends:**
+
+| What happens on the server | What the frontend sees |
+|---|---|
+| Python `async for chunk in graph.astream(...)` exhausts | FastAPI `StreamingResponse` generator returns |
+| FastAPI closes the HTTP response body | `reader.read()` returns `{ done: true, value: undefined }` |
+| `while(true)` loop hits `if (done) break` | Frontend cleans up state, re-enables input |
+
+There is **no explicit "end" SSE event** needed — the HTTP connection closing is the signal.
+
+---
+
+### Single stream vs multiple concurrent streams
+
+**Per user, per message = one stream:**
+
+Each `POST /stream/chat` or `GET /sessions/{id}/execute` opens exactly one HTTP connection that streams until complete, then closes. The next user message opens a brand new HTTP connection.
+
+```
+Message 1:  POST → [stream opens] ──── [events] ──── [stream closes]
+Message 2:                                               POST → [stream opens] ──── [stream closes]
+```
+
+**Multiple concurrent users = multiple independent streams:**
+
+Each user's request is handled by a separate asyncio coroutine in FastAPI. There is no shared global stream state — each `agent.astream()` call is independent.
+
+```
+User A:  POST /stream/chat ─── [coroutine A] ─── SSE stream A ──► Browser A
+User B:  POST /stream/chat ─── [coroutine B] ─── SSE stream B ──► Browser B
+User C:  POST /stream/chat ─── [coroutine C] ─── SSE stream C ──► Browser C
+         (all three run concurrently in the same FastAPI process via asyncio)
+```
+
+**Plan mode — two streams, same session:**
+
+The plan stream (Stream 1) and execute stream (Stream 2) are sequential, not concurrent. Stream 1 closes before the user triggers Stream 2. They share the same `thread_id`/`session_id` but never overlap.
 
 ---
 
