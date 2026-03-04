@@ -17,7 +17,7 @@ from app.auth.authorization import get_current_user, get_current_user_with_token
 from app.models import TokenData
 from app.agent.graph import get_orchestrator
 from app.agent.react_agent import chat_stream
-from app.mcp.client import mcp_client
+from app.mcp.client import list_mcp_tools, call_mcp_tool as invoke_mcp_tool
 from app.config.logging_config import get_logger, LogContext
 
 logger = get_logger("streaming")
@@ -85,12 +85,12 @@ async def stream_chat(
             token=mcp_token,
             user_id=current_user.user_id,
         ):
-            yield f"data: {json.dumps(event)}\n\n"
+            yield event
 
     log.info("📤 Response: Starting SSE stream for chat")
 
     return StreamingResponse(
-        generate(),
+        event_generator(generate()),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -98,6 +98,24 @@ async def stream_chat(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/chat/history")
+async def get_chat_history_endpoint(
+    current_user: TokenData = Depends(get_current_user)
+):
+    """
+    Retrieve chat conversation history for the current user.
+
+    Returns messages in the same format as the frontend chatMessages array,
+    sourced from the LangGraph MongoDBSaver checkpointer (thread_id = chat-{user_id}).
+    """
+    from app.agent.react_agent import get_chat_history
+    log = LogContext(logger, user_id=current_user.user_id)
+    log.info("📥 Request: Get chat history")
+    messages = await get_chat_history(current_user.user_id)
+    log.info(f"📤 Response: {len(messages)} chat history messages")
+    return {"messages": messages, "thread_id": f"chat-{current_user.user_id}"}
 
 
 @router.post("/sessions")
@@ -174,13 +192,14 @@ async def stream_plan_generation(
     orchestrator = await get_orchestrator()
     
     # Check if this is a pending session that needs execution
-    pending = _pending_sessions.pop(session_id, None)
+    pending = _pending_sessions.get(session_id)
     
     if pending:
         # Start graph execution with streaming
         log.info(f"🚀 Starting graph execution for pending session")
         
         async def stream_new_plan():
+            _pending_sessions.pop(session_id, None)  # Safe to remove once streaming begins
             async for event in orchestrator.stream_graph(
                 session_id,
                 pending["initial_state"],
@@ -244,16 +263,34 @@ async def update_session_plan(
     current_user: TokenData = Depends(get_current_user)
 ):
     """Update the plan for a session (user modification)."""
-    # Note: LangGraph handles plan updates via interrupt/replan
-    # This endpoint is for backward compatibility
+    log = LogContext(logger, session_id=session_id, user_id=current_user.user_id)
+    log.info("📥 Request: Update plan")
+    
     orchestrator = await get_orchestrator()
     
-    # Use the replan feature
-    mcp_token = await create_mcp_token(current_user)
+    # Verify ownership
+    state = await orchestrator.get_session_state(session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if state.get("user_id") != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
     
+    # Update plan in LangGraph state via aupdate_state
+    config = {"configurable": {"thread_id": session_id}}
+    try:
+        await orchestrator._graph.aupdate_state(
+            config,
+            {"plan": request.plan},
+            as_node="planner"  # Update as if planner produced this plan
+        )
+    except Exception as e:
+        log.error(f"❌ Failed to update plan: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update plan: {str(e)}")
+    
+    log.info("📤 Response: Plan updated")
     return {
         "session_id": session_id,
-        "message": "Use POST /agent/v2/sessions/{id}/replan for plan modifications",
+        "message": "Plan updated successfully",
         "plan": request.plan
     }
 
@@ -522,7 +559,7 @@ async def get_mcp_tools(
     
     try:
         # Get tools from external MCP Server
-        tools = await mcp_client.list_tools(token=credentials.credentials)
+        tools = await list_mcp_tools(token=credentials.credentials)
         
         accessible_tools = []
         for tool in tools:
@@ -552,7 +589,7 @@ async def call_mcp_tool(
     log.info(f"📥 Request: Call MCP tool '{tool_name}'", data={"args": args})
     
     try:
-        result = await mcp_client.call_tool(
+        result = await invoke_mcp_tool(
             tool_name=tool_name,
             arguments=args,
             token=credentials.credentials

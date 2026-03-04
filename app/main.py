@@ -107,8 +107,8 @@ app = FastAPI(
     A containerized Python application demonstrating:
     - MCP Server with RBAC support
     - LangGraph agent with plan mode
-    - Hot state checkpoints (MongoDB)
-    - Cold state checkpoints (Redis)
+    - MongoDB checkpointing (via LangGraph MongoDBSaver)
+    - Redis for auth token blacklist and session cache
     - CRUD operations
     - JWT-based authentication and authorization
     - Real AI-powered agents via Vertex AI

@@ -2,10 +2,8 @@
 
 This module provides MongoDB and Redis connections for the application.
 
-For agent checkpointing, use LangGraph's checkpointers:
-- app/agent/checkpointer.py: AsyncDualCheckpointer (Redis hot + MongoDB cold)
-- langgraph-checkpoint-mongodb: AsyncMongoDBSaver
-- langgraph-checkpoint-redis: AsyncRedisSaver
+- MongoDB: Used by LangGraph MongoDBSaver for agent checkpointing
+- Redis: Used for token blacklisting (auth) and session caching
 """
 
 from app.checkpoints.mongodb_store import mongodb_checkpoint, get_mongodb, MongoDBConnection

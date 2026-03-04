@@ -1,7 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { api } from '../api';
-
-const API_BASE = 'http://localhost:8000';
+import { api, API_BASE } from '../api';
 
 /**
  * Chat-like session interface for AI Agent interactions.

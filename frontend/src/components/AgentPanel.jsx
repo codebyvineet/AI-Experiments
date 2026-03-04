@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { api } from '../api';
+import { api, API_BASE } from '../api';
 
 export default function AgentPanel({ token, user }) {
   const [mode, setMode] = useState('plan'); // 'plan' or 'chat'
@@ -30,6 +30,29 @@ export default function AgentPanel({ token, user }) {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
 
+  // Load chat history from backend when entering chat mode (once per session)
+  const loadChatHistory = async () => {
+    try {
+      const data = await api.getChatHistory(token);
+      if (data.messages && data.messages.length > 0) {
+        setChatMessages([
+          { role: 'system', content: '── Previous conversation ──' },
+          ...data.messages,
+          { role: 'system', content: '── New messages ──' },
+        ]);
+      }
+    } catch (err) {
+      console.error('Failed to load chat history:', err);
+      // Fail silently — chat still works, just starts fresh
+    }
+  };
+
+  useEffect(() => {
+    if (mode === 'chat' && chatMessages.length === 0 && token) {
+      loadChatHistory();
+    }
+  }, [mode]);
+
   // Chat mode: send message and stream ReAct agent response
   const handleChatSend = async () => {
     const msg = chatInput.trim();
@@ -44,7 +67,7 @@ export default function AgentPanel({ token, user }) {
     const assistantIdx = { current: null };
 
     try {
-      const response = await fetch('http://localhost:8000/stream/chat', {
+      const response = await fetch(`${API_BASE}/stream/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -119,6 +142,18 @@ export default function AgentPanel({ token, user }) {
     // Don't restore if already on this session
     if (sid === sessionId) return;
     
+    // Abort any active SSE stream before switching
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    if (chatAbortRef.current) {
+      chatAbortRef.current.abort();
+      chatAbortRef.current = null;
+    }
+    setIsStreaming(false);
+    setChatStreaming(false);
+    
     try {
       const session = await api.getSession(token, sid);
       if (session) {
@@ -154,8 +189,6 @@ export default function AgentPanel({ token, user }) {
     setEvents(prev => [...prev, { ...event, timestamp: new Date().toISOString() }]);
   }, []);
 
-  const API_BASE = 'http://localhost:8000';
-  
   // Enhanced SSE streaming with abort support
   const streamSSE = async (path) => {
     setIsStreaming(true);
@@ -578,6 +611,10 @@ export default function AgentPanel({ token, user }) {
                           className="prose prose-invert prose-sm max-w-none [&_ul]:list-disc [&_ul]:ml-4 [&_ol]:list-decimal [&_ol]:ml-4 [&_strong]:text-white"
                           dangerouslySetInnerHTML={{
                             __html: (typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content))
+                              .replace(/&/g, '&amp;')
+                              .replace(/</g, '&lt;')
+                              .replace(/>/g, '&gt;')
+                              .replace(/"/g, '&quot;')
                               .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
                               .replace(/^\* /gm, '• ')
                               .replace(/\n/g, '<br/>')

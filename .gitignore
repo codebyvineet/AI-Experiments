@@ -78,6 +78,7 @@ docker-compose.override.yml
 
 # Local data
 data/
+dump.rdb
 
 # Google Cloud Service Account credentials
 *.json
@@ -91,3 +92,6 @@ gcp-credentials*.json
 node_modules/
 frontend/dist/
 *.png
+*.jpeg
+*.jpg
+google-adk/app/.adk/

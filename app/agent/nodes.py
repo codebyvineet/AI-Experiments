@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from langgraph.types import interrupt, Send
 
 from app.agent.state import AgentState, PlanStep, TaskResult
-from app.mcp.client import mcp_client
+from app.mcp.client import call_mcp_tool
 from app.config.logging_config import get_logger, LogContext
 
 logger = get_logger("langgraph_nodes")
@@ -244,11 +244,11 @@ async def task_executor_node(task_state: Dict[str, Any]) -> Dict[str, Any]:
     
     try:
         if tool_name:
-            # Call MCP tool via mcp_client
+            # Call MCP tool
             log.info(f"[AIFLOW] MCP Tool Called: {tool_name} with params: {json.dumps(tool_params)}")
             
             try:
-                tool_result = await mcp_client.call_tool(tool_name, tool_params, token)
+                tool_result = await call_mcp_tool(tool_name, tool_params, token)
                 result = {
                     "status": "success",
                     "result": tool_result,

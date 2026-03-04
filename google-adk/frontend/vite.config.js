@@ -1,0 +1,21 @@
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  base: '/app/',
+  server: {
+    port: 3000,
+    proxy: {
+      '/auth': 'http://localhost:8000',
+      '/items': 'http://localhost:8000',
+      '/agent': 'http://localhost:8000',
+      '/health': 'http://localhost:8000',
+      '/mcp-proxy': {
+        target: 'http://localhost:8001',
+        rewrite: (path) => path.replace(/^\/mcp-proxy/, ''),
+      },
+      '/mcp': 'http://localhost:8000',
+    }
+  }
+})

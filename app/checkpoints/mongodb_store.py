@@ -1,7 +1,7 @@
 """MongoDB database connection management.
 
 This module provides the MongoDB connection for the application.
-Agent checkpointing is handled by LangGraph (see app/agent/checkpointer.py).
+Agent checkpointing uses LangGraph MongoDBSaver (see app/agent/graph.py).
 """
 
 from typing import Optional

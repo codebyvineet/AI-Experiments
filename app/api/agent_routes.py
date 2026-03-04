@@ -1,7 +1,7 @@
 """Agent API routes for LangGraph orchestrator.
 
 All agent functionality uses LangGraph framework with:
-- Automatic checkpointing (Redis hot + MongoDB cold)
+- Automatic checkpointing (MongoDB via LangGraph)
 - Human-in-the-loop approval via interrupt()
 - Parallel task execution via Send()
 - Session resume, re-plan, and stop features
@@ -49,7 +49,7 @@ async def create_session(
     Create a new LangGraph session and generate plan.
     
     This uses the LangGraph-based orchestrator with:
-    - Automatic checkpointing (Redis hot + MongoDB cold)
+    - Automatic checkpointing (MongoDB via LangGraph)
     - Human-in-the-loop approval via interrupt()
     - Parallel task execution via Send()
     

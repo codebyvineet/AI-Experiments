@@ -5,15 +5,62 @@ import time
 from typing import Dict, Any, List, Optional, AsyncGenerator
 from datetime import datetime, timezone
 
-import vertexai
-from vertexai.generative_models import GenerativeModel, Part, Content, Tool, FunctionDeclaration
+from langchain_google_vertexai import ChatVertexAI
+from langchain_core.messages import HumanMessage, SystemMessage
 from google.oauth2 import service_account
+
+from pydantic import BaseModel, Field as PydanticField
+from typing import Literal
 
 from app.config.settings import get_settings
 from app.config.logging_config import get_logger, LogContext
-from app.mcp.client import mcp_client, get_mcp_tools_description
+from app.mcp.client import call_mcp_tool, list_mcp_tools
 
 logger = get_logger("ai_service")
+
+
+class SubTaskSchema(BaseModel):
+    name: str
+    description: str
+    tool: Optional[str] = None
+    tool_params: Dict[str, Any] = {}
+
+class PlanStepSchema(BaseModel):
+    phase: str
+    description: str
+    agent_type: str
+    execution_mode: Literal["sequential", "parallel"]
+    sub_tasks: List[SubTaskSchema]
+    reasoning: str
+    mcp_tools_used: List[str] = []
+
+class PlanSchema(BaseModel):
+    analysis: str
+    steps: List[PlanStepSchema]
+    estimated_complexity: Literal["low", "medium", "high"]
+
+class TaskResultSchema(BaseModel):
+    status: Literal["success", "partial", "failed"]
+    result: str
+    output_data: Dict[str, Any] = {}
+    notes: str = ""
+
+class SummarySchema(BaseModel):
+    overall_status: Literal["success", "partial", "failed"]
+    summary: str
+    key_results: List[str] = []
+    recommendations: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+class MCPAnalysisToolSchema(BaseModel):
+    tool_name: str
+    reason: str
+    arguments: Dict[str, Any] = {}
+    order: int
+
+class MCPAnalysisSchema(BaseModel):
+    tools_to_use: List[MCPAnalysisToolSchema] = []
+    analysis: str
 
 
 def get_system_tools_description() -> str:
@@ -46,13 +93,26 @@ All operations go through the MCP Server which handles authorization.
 
 
 async def get_dynamic_tools_description() -> str:
-    """Get dynamic tools description from MCP server.
-    
-    This fetches the actual tools available from the external MCP server.
-    Falls back to static description if MCP server is unavailable.
-    """
+    """Get dynamic tools description from MCP server, including parameter schemas."""
     try:
-        return await get_mcp_tools_description()
+        tools = await list_mcp_tools()
+        lines = []
+        for t in tools:
+            schema = t.get("inputSchema", {})
+            props = schema.get("properties", {})
+            required = schema.get("required", [])
+            if props:
+                params = []
+                for pname, pinfo in props.items():
+                    ptype = pinfo.get("type", "any")
+                    pdesc = pinfo.get("description", "")
+                    req = " (REQUIRED)" if pname in required else ""
+                    params.append(f"    - {pname} ({ptype}{req}): {pdesc}")
+                params_str = "\n".join(params)
+                lines.append(f"- **{t['name']}**: {t.get('description', '')}\n  Parameters:\n{params_str}")
+            else:
+                lines.append(f"- **{t['name']}**: {t.get('description', '')}")
+        return "\n".join(lines)
     except Exception as e:
         logger.warning(f"Could not fetch MCP tools, using static description: {e}")
         return get_system_tools_description()
@@ -63,47 +123,43 @@ class AIService:
     
     def __init__(self):
         self.settings = get_settings()
-        self.model: Optional[GenerativeModel] = None
+        self._model: Optional[ChatVertexAI] = None
         self._initialized = False
     
     async def initialize(self) -> bool:
-        """Initialize the Vertex AI client."""
+        """Initialize the ChatVertexAI model."""
         log = LogContext(logger)
         
         if self._initialized:
             return True
         
         try:
-            log.info("🔧 Initializing Vertex AI client", data={
+            log.info("🔧 Initializing ChatVertexAI", data={
                 "project": self.settings.google_cloud_project,
                 "location": self.settings.google_cloud_location,
                 "model": self.settings.vertexai_model
             })
             
-            # Initialize Vertex AI
+            kwargs = {
+                "model_name": self.settings.vertexai_model,
+                "project": self.settings.google_cloud_project,
+                "location": self.settings.google_cloud_location,
+                "temperature": 0,
+                "max_output_tokens": 8192,
+            }
+            
             if self.settings.google_application_credentials:
-                credentials = service_account.Credentials.from_service_account_file(
+                kwargs["credentials"] = service_account.Credentials.from_service_account_file(
                     self.settings.google_application_credentials
                 )
-                vertexai.init(
-                    project=self.settings.google_cloud_project,
-                    location=self.settings.google_cloud_location,
-                    credentials=credentials
-                )
-            else:
-                vertexai.init(
-                    project=self.settings.google_cloud_project,
-                    location=self.settings.google_cloud_location
-                )
             
-            # Create model instance
-            self.model = GenerativeModel(self.settings.vertexai_model)
+            self._model = ChatVertexAI(**kwargs)
             self._initialized = True
-            log.info("✅ Vertex AI client initialized successfully")
+            log.info("✅ ChatVertexAI initialized successfully")
             return True
             
         except Exception as e:
-            log.error(f"❌ Failed to initialize Vertex AI: {e}")
+            log.error(f"❌ Failed to initialize ChatVertexAI: {e}")
             return False
     
     def _format_previous_results(self, previous_results: List[Dict[str, Any]]) -> str:
@@ -202,7 +258,7 @@ Response format:
                     "name": "Descriptive task name",
                     "description": "What this sub-task does",
                     "tool": "tool name from list above, or null for AI analysis",
-                    "tool_params": {{}}
+                    "tool_params": {{"param1": "actual_value_from_goal", "param2": "extracted_value"}}
                 }}
             ],
             "reasoning": "Why this step is needed",
@@ -219,13 +275,16 @@ Respond ONLY with valid JSON, no markdown or explanation.
         log.ai_request(prompt, self.settings.vertexai_model)
         
         try:
-            # Generate response
-            response = await self._generate_content(prompt, session_id)
+            # Generate structured plan using with_structured_output
+            plan_data_obj = await self._generate_structured(prompt, PlanSchema, session_id)
             duration_ms = int((time.time() - start_time) * 1000)
-            log.ai_response(response, duration_ms)
+            log.ai_response(str(plan_data_obj), duration_ms)
             
-            # Parse the plan
-            plan_data = json.loads(response)
+            # Convert Pydantic model to dict for compatibility
+            plan_data = plan_data_obj.model_dump()
+            
+            # Repair empty tool_params (Gemini structured output sometimes omits them)
+            plan_data = await self._repair_empty_tool_params(plan_data, goal, session_id)
             
             # Yield analysis first
             yield {
@@ -278,7 +337,7 @@ Respond ONLY with valid JSON, no markdown or explanation.
                 "complexity": plan_data.get("estimated_complexity")
             }, duration_ms=duration_ms)
             
-        except json.JSONDecodeError as e:
+        except (ValueError, TypeError) as e:
             log.error(f"❌ Failed to parse AI response as JSON: {e}")
             # Fall back to default plan
             yield {"type": "error", "error": f"AI response parsing error: {e}"}
@@ -315,10 +374,8 @@ Respond ONLY with valid JSON, no markdown or explanation.
         
         # List of all available MCP tools
         available_mcp_tools = [
-            "create_item", "read_item", "update_item", "delete_item", "list_items",
-            "search_items", "bulk_create", "bulk_delete", 
-            "get_statistics", "generate_report",
-            "get_user_profile", "update_user_profile"
+            "create_item", "read_item", "update_item", "delete_item",
+            "list_items", "search_items",
         ]
         
         # If a specific MCP tool is specified AND we have a token, execute via MCP client
@@ -330,7 +387,7 @@ Respond ONLY with valid JSON, no markdown or explanation.
             
             try:
                 # Call tool via MCP client (external MCP server)
-                mcp_result = await mcp_client.call_tool(task_tool, task_tool_params, token)
+                mcp_result = await call_mcp_tool(task_tool, task_tool_params, token)
                 duration_ms = int((time.time() - start_time) * 1000)
                 
                 # Log MCP result with grepable prefix
@@ -388,7 +445,7 @@ Respond ONLY with valid JSON, no markdown or explanation.
                 log.error(f"❌ MCP authorization error: {e}")
                 return {
                     "task_name": task_name,
-                    "status": "failed",
+                    "status": "authorization_failed",
                     "result": f"Authorization error: {str(e)}",
                     "duration_ms": duration_ms
                 }
@@ -446,11 +503,11 @@ Respond ONLY with valid JSON.
         log.ai_request(prompt, self.settings.vertexai_model)
         
         try:
-            response = await self._generate_content(prompt, session_id)
+            result_obj = await self._generate_structured(prompt, TaskResultSchema, session_id)
             duration_ms = int((time.time() - start_time) * 1000)
-            log.ai_response(response, duration_ms)
+            log.ai_response(str(result_obj), duration_ms)
             
-            result = json.loads(response)
+            result = result_obj.model_dump()
             log.agent_complete(task_name, result.get("result", ""), duration_ms)
             
             return {
@@ -518,11 +575,11 @@ Respond ONLY with valid JSON.
         log.ai_request(prompt, self.settings.vertexai_model)
         
         try:
-            response = await self._generate_content(prompt, session_id)
+            result_obj = await self._generate_structured(prompt, MCPAnalysisSchema, session_id)
             duration_ms = int((time.time() - start_time) * 1000)
-            log.ai_response(response, duration_ms)
+            log.ai_response(str(result_obj), duration_ms)
             
-            result = json.loads(response)
+            result = result_obj.model_dump()
             log.info("✅ MCP analysis complete", data={
                 "tools_recommended": len(result.get("tools_to_use", []))
             }, duration_ms=duration_ms)
@@ -577,11 +634,11 @@ Respond ONLY with valid JSON.
         log.ai_request(prompt, self.settings.vertexai_model)
         
         try:
-            response = await self._generate_content(prompt, session_id)
+            result_obj = await self._generate_structured(prompt, SummarySchema, session_id)
             duration_ms = int((time.time() - start_time) * 1000)
-            log.ai_response(response, duration_ms)
+            log.ai_response(str(result_obj), duration_ms)
             
-            return json.loads(response)
+            return result_obj.model_dump()
             
         except Exception as e:
             log.error(f"❌ Summary generation failed: {e}")
@@ -593,29 +650,116 @@ Respond ONLY with valid JSON.
             }
     
     async def _generate_content(self, prompt: str, session_id: str) -> str:
-        """Generate content using the model."""
+        """Generate raw text content using ChatVertexAI."""
         log = LogContext(logger, session_id=session_id)
         
-        if not self.model:
+        if not self._model:
             raise RuntimeError("AI model not initialized")
         
         try:
-            response = self.model.generate_content(prompt)
-            text = response.text.strip()
-            
-            # Clean up response if wrapped in markdown
-            if text.startswith("```json"):
-                text = text[7:]
-            if text.startswith("```"):
-                text = text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            
-            return text.strip()
-            
+            response = await self._model.ainvoke([HumanMessage(content=prompt)])
+            return response.content.strip()
         except Exception as e:
             log.error(f"❌ Content generation error: {e}")
             raise
+    
+    async def _generate_structured(self, prompt: str, schema, session_id: str):
+        """Generate structured output validated against a Pydantic model."""
+        log = LogContext(logger, session_id=session_id)
+        
+        if not self._model:
+            raise RuntimeError("AI model not initialized")
+        
+        try:
+            structured_model = self._model.with_structured_output(schema)
+            result = await structured_model.ainvoke([HumanMessage(content=prompt)])
+            if result is not None:
+                return result
+            # Fallback: structured output returned None, try raw + manual parse
+            log.warning("⚠️ Structured output returned None, falling back to raw generation")
+        except Exception as e:
+            log.warning(f"⚠️ Structured generation failed ({e}), falling back to raw generation")
+        
+        # Fallback: generate raw text and parse manually
+        raw = await self._model.ainvoke([HumanMessage(content=prompt)])
+        text = raw.content if hasattr(raw, 'content') else str(raw)
+        if isinstance(text, list):
+            text = "".join(p.get("text", str(p)) if isinstance(p, dict) else str(p) for p in text)
+        # Strip markdown fences
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+        import json as _json
+        return schema.model_validate(_json.loads(text))
+
+    async def _repair_empty_tool_params(self, plan_data: dict, goal: str, session_id: str) -> dict:
+        """Repair sub-tasks that have a tool but empty tool_params.
+        
+        Gemini's with_structured_output sometimes returns empty tool_params
+        for Dict[str, Any] fields, especially with multiple sub-tasks.
+        This makes a focused AI call to extract the missing parameters.
+        """
+        log = LogContext(logger, session_id=session_id, agent_type="planning")
+        
+        # Collect tool schemas for reference
+        try:
+            tools_info = await list_mcp_tools()
+            tool_schemas = {t["name"]: t.get("inputSchema", {}) for t in tools_info}
+        except Exception:
+            tool_schemas = {}
+        
+        for step in plan_data.get("steps", []):
+            for task in step.get("sub_tasks", []):
+                tool = task.get("tool")
+                params = task.get("tool_params", {})
+                
+                if tool and not params:
+                    log.info(f"🔧 Repairing empty tool_params for task: {task.get('name')}")
+                    
+                    # Get schema for this tool
+                    schema_info = tool_schemas.get(tool, {})
+                    props = schema_info.get("properties", {})
+                    required = schema_info.get("required", [])
+                    param_desc = ", ".join(
+                        f"{k} ({v.get('type', 'any')}{' REQUIRED' if k in required else ''}): {v.get('description', '')}"
+                        for k, v in props.items()
+                    )
+                    
+                    repair_prompt = f"""Extract tool parameters from the task description.
+
+GOAL: {goal}
+TASK: {task.get('name')} — {task.get('description')}
+TOOL: {tool}
+PARAMETERS: {param_desc}
+
+Return ONLY a JSON object with the parameter values. Example:
+{{"name": "actual value", "description": "actual value", "data": {{"key": "value"}}}}
+
+Extract real values from the goal and task description. Do NOT use placeholders."""
+                    
+                    try:
+                        raw = await self._model.ainvoke([HumanMessage(content=repair_prompt)])
+                        text = raw.content if hasattr(raw, 'content') else str(raw)
+                        if isinstance(text, list):
+                            text = "".join(p.get("text", str(p)) if isinstance(p, dict) else str(p) for p in text)
+                        text = text.strip()
+                        if text.startswith("```"):
+                            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+                        if text.endswith("```"):
+                            text = text[:-3]
+                        text = text.strip()
+                        
+                        repaired_params = json.loads(text)
+                        if isinstance(repaired_params, dict) and repaired_params:
+                            task["tool_params"] = repaired_params
+                            log.info(f"✅ Repaired tool_params for {task.get('name')}: {json.dumps(repaired_params)}")
+                    except Exception as e:
+                        log.warning(f"⚠️ Could not repair tool_params for {task.get('name')}: {e}")
+        
+        return plan_data
 
 
 # Global AI service instance

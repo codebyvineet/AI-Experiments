@@ -3,26 +3,39 @@
 Uses framework methods exclusively:
 - langgraph.prebuilt.create_react_agent for the ReAct loop
 - langchain_google_vertexai.ChatVertexAI for the LLM
-- langchain_mcp_adapters.client.MultiServerMCPClient for MCP tool binding
+- app.mcp.client.create_mcp_client for MCP tool binding
 
 No custom ReAct logic — the framework handles think→act→observe→respond.
 """
 
-import os
+import asyncio
 import json
-from typing import Dict, Any, AsyncGenerator, Optional
+from typing import Dict, Any, AsyncGenerator, List, Optional
 
 from langchain_google_vertexai import ChatVertexAI
 from langgraph.prebuilt import create_react_agent
-from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.checkpoint.mongodb import MongoDBSaver
+from pymongo import MongoClient
 from google.oauth2 import service_account
 
 from app.config.settings import get_settings
 from app.config.logging_config import get_logger
+from app.mcp.client import create_mcp_client
 
 logger = get_logger("react_agent")
 
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://mcp-server:8001")
+# Lazy-initialized checkpointer for conversation history
+_chat_checkpointer = None
+
+
+def _get_chat_checkpointer() -> MongoDBSaver:
+    """Get or create the MongoDB checkpointer for chat conversation history."""
+    global _chat_checkpointer
+    if _chat_checkpointer is None:
+        settings = get_settings()
+        client = MongoClient(settings.mongodb_url)
+        _chat_checkpointer = MongoDBSaver(client, db_name=settings.mongodb_database)
+    return _chat_checkpointer
 
 
 def _get_chat_model() -> ChatVertexAI:
@@ -45,16 +58,81 @@ def _get_chat_model() -> ChatVertexAI:
     return ChatVertexAI(**kwargs)
 
 
-def _get_mcp_client(token: str) -> MultiServerMCPClient:
-    """Create an MCP client with auth headers for tool binding."""
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    return MultiServerMCPClient({
-        "main": {
-            "transport": "http",
-            "url": f"{MCP_SERVER_URL}/mcp",
-            "headers": headers,
-        }
-    })
+def _extract_text_content(content) -> str:
+    """Extract plain text from LangChain message content (handles Gemini list-of-blocks format)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and "text" in part:
+                parts.append(part["text"])
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(parts)
+    return str(content) if content else ""
+
+
+async def get_chat_history(user_id: str) -> List[Dict[str, Any]]:
+    """
+    Retrieve conversation history for a user from the LangGraph checkpointer.
+
+    Returns a list of message dicts matching the frontend chatMessages format:
+      {"role": "user",      "content": "..."}
+      {"role": "assistant", "content": "..."}
+      {"role": "tool",      "tool": "...", "content": "...", "toolType": "call"}
+      {"role": "tool",      "tool": "...", "content": "...", "toolType": "result"}
+    """
+    thread_id = f"chat-{user_id}"
+    checkpointer = _get_chat_checkpointer()
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+    # MongoDBSaver.get() is synchronous — run in executor to avoid blocking event loop
+    checkpoint_tuple = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: checkpointer.get(config)
+    )
+
+    if not checkpoint_tuple:
+        return []
+
+    # MongoDBSaver.get() returns the Checkpoint dict directly (not a CheckpointTuple)
+    channel_values = checkpoint_tuple.get("channel_values", {})
+    raw_messages = channel_values.get("messages", [])
+
+    result = []
+    for msg in raw_messages:
+        msg_type = getattr(msg, "type", None)
+        content = getattr(msg, "content", "")
+
+        if msg_type == "human":
+            text = _extract_text_content(content)
+            if text:
+                result.append({"role": "user", "content": text})
+
+        elif msg_type == "ai":
+            tool_calls = getattr(msg, "tool_calls", [])
+            if tool_calls:
+                for tc in tool_calls:
+                    result.append({
+                        "role": "tool",
+                        "content": f"🔧 Calling **{tc['name']}**({json.dumps(tc.get('args', {}))})",
+                        "tool": tc["name"],
+                        "toolType": "call",
+                    })
+            else:
+                text = _extract_text_content(content)
+                if text:
+                    result.append({"role": "assistant", "content": text})
+
+        elif msg_type == "tool":
+            result.append({
+                "role": "tool",
+                "content": str(content)[:2000],
+                "tool": getattr(msg, "name", "tool") or "tool",
+                "toolType": "result",
+            })
+
+    return result
 
 
 async def chat_stream(
@@ -77,7 +155,9 @@ async def chat_stream(
       {"type": "response",    "message": "..."}
       {"type": "error",       "error": "..."}
     """
-    logger.info(f"[Chat] Starting ReAct chat for user={user_id}: {message[:80]}")
+    # Use user_id as thread_id for conversation history (one thread per user)
+    thread_id = f"chat-{user_id}"
+    logger.info(f"[Chat] Starting ReAct chat for user={user_id} thread={thread_id}: {message[:80]}")
 
     yield {"type": "thinking", "message": "Connecting to MCP tools..."}
 
@@ -89,7 +169,7 @@ async def chat_stream(
         return
 
     try:
-        mcp = _get_mcp_client(token)
+        mcp = create_mcp_client(token)
         tools = await mcp.get_tools()
         tool_names = [t.name for t in tools]
         logger.info(f"[Chat] Loaded {len(tools)} MCP tools: {tool_names}")
@@ -106,16 +186,20 @@ async def chat_stream(
             "For questions about items, counts, or data, call list_items or search_items first, "
             "then analyze the results and give a clear, detailed answer with actual numbers."
         )
-        agent = create_react_agent(model, tools, prompt=system_prompt)
+        agent = create_react_agent(
+            model, tools, prompt=system_prompt,
+            checkpointer=_get_chat_checkpointer(),
+        )
 
         final_response = None
 
-        # Stream node-by-node updates from the agent graph
+        # Stream node-by-node updates with recursion limit to prevent infinite loops
         async for chunk in agent.astream(
             {"messages": [("user", message)]},
             stream_mode="updates",
+            config={"configurable": {"thread_id": thread_id}, "recursion_limit": 25},
         ):
-            for node_name, node_output in chunk.items():
+            for _, node_output in chunk.items():
                 messages = node_output.get("messages", [])
                 for msg in messages:
                     if msg.type == "ai":

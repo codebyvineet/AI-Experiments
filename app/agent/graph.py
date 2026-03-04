@@ -6,11 +6,9 @@ This module builds the complete LangGraph state machine with:
 - Executor: Parallel task execution with Send()
 - Summary: Final result aggregation
 
-Checkpointing uses MongoDB (sync/async supported).
-Redis can be added for hot caching if needed.
+Checkpointing uses MongoDB via LangGraph's MongoDBSaver.
 """
 
-import os
 import uuid
 import asyncio
 from datetime import datetime, timezone
@@ -37,9 +35,6 @@ from app.config.logging_config import get_logger, LogContext
 
 logger = get_logger("langgraph")
 
-# Dual checkpointing is now handled by LangGraph natively via TTL support
-USE_DUAL_CHECKPOINTER = os.getenv("USE_DUAL_CHECKPOINTER", "false").lower() == "true"
-
 
 class LangGraphOrchestrator:
     """
@@ -48,7 +43,7 @@ class LangGraphOrchestrator:
     Features:
     - Human-in-the-loop approval via interrupt()
     - Parallel task execution via Send()
-    - Dual checkpointing: Redis (hot) + MongoDB (cold)
+    - MongoDB checkpointing via LangGraph MongoDBSaver
     - SSE streaming support
     
     Architecture:
@@ -68,69 +63,23 @@ class LangGraphOrchestrator:
         self._graph = None
         self._checkpointer = None
         self._mongo_client = None
-        self._redis_client = None
     
     async def initialize(self) -> None:
-        """Initialize the LangGraph with checkpointer."""
+        """Initialize the LangGraph with MongoDB checkpointer."""
         log = LogContext(logger)
         log.info("🚀 Initializing LangGraph orchestrator")
         
-        # Setup checkpointer (dual or MongoDB-only)
-        if USE_DUAL_CHECKPOINTER:
-            await self._setup_dual_checkpointer(log)
-        else:
-            await self._setup_mongo_checkpointer(log)
-        
-        # Build the graph
-        self._graph = self._build_graph()
-        
-        log.info("✅ LangGraph orchestrator initialized")
-    
-    async def _setup_dual_checkpointer(self, log: LogContext) -> None:
-        """Setup dual checkpointer with Redis (hot) + MongoDB (cold)."""
-        try:
-            from langgraph.checkpoint.redis import AsyncRedisSaver
-            from redis.asyncio import Redis
-            
-            log.info("🔧 Setting up dual checkpointer (Redis + MongoDB)")
-            
-            # MongoDB (cold storage - permanent)
-            self._mongo_client = MongoClient(self.settings.mongodb_url)
-            mongo_saver = MongoDBSaver(
-                self._mongo_client,
-                db_name=self.settings.mongodb_database
-            )
-            
-            # Redis (hot storage - 30 min TTL)
-            redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
-            self._redis_client = Redis.from_url(redis_url)
-            redis_saver = AsyncRedisSaver(conn=self._redis_client)
-            await redis_saver.setup()
-            
-            # For now, just use MongoDB since it supports both sync/async
-            # LangGraph handles the async wrapping internally
-            self._checkpointer = mongo_saver
-            
-            log.info("✅ Checkpointer ready (MongoDB with optional Redis cache)")
-            
-        except ImportError as e:
-            log.warning(f"⚠️ Redis not available, using MongoDB only: {e}")
-            await self._setup_mongo_checkpointer(log)
-        except Exception as e:
-            log.warning(f"⚠️ Dual checkpointer failed, falling back to MongoDB: {e}")
-            await self._setup_mongo_checkpointer(log)
-    
-    async def _setup_mongo_checkpointer(self, log: LogContext) -> None:
-        """Setup MongoDB-only checkpointer (fallback)."""
-        log.info("🔧 Setting up MongoDB checkpointer")
-        
+        # Setup MongoDB checkpointer via LangGraph MongoDBSaver
         self._mongo_client = MongoClient(self.settings.mongodb_url)
         self._checkpointer = MongoDBSaver(
             self._mongo_client,
             db_name=self.settings.mongodb_database
         )
         
-        log.info("✅ MongoDB checkpointer ready")
+        # Build the graph
+        self._graph = self._build_graph()
+        
+        log.info("✅ LangGraph orchestrator initialized")
     
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph state machine."""
@@ -303,7 +252,7 @@ class LangGraphOrchestrator:
                 final_state = await self.get_session_state(session_id)
                 if final_state and final_state.get("plan"):
                     plan = final_state["plan"]
-                    if not any(e.get("type") == "plan_complete" for e in []):
+                    if True:  # Always yield plan_complete on interrupt
                         yield {"type": "plan_complete", "plan": plan, "total_steps": len(plan)}
             else:
                 log.error(f"❌ Stream error: {e}")
@@ -366,31 +315,13 @@ class LangGraphOrchestrator:
         try:
             db = self._mongo_client[self.settings.mongodb_database]
             
-            # Use aggregation pipeline to get latest checkpoint per thread
-            # and filter by user_id in a single query
-            pipeline = [
-                # Sort by checkpoint_id descending to get latest first
-                {"$sort": {"checkpoint_id": -1}},
-                # Group by thread_id, take the first (latest) document
-                {"$group": {
-                    "_id": "$thread_id",
-                    "latest_checkpoint": {"$first": "$checkpoint"},
-                    "thread_id": {"$first": "$thread_id"}
-                }},
-                # Limit to reasonable number
-                {"$limit": 100}
-            ]
-            
-            async_db = self._mongo_client[self.settings.mongodb_database]
-            # Use Motor async client if available, fallback to sync
-            from motor.motor_asyncio import AsyncIOMotorClient
-            import json
-            
             # Get all checkpoints efficiently
-            thread_ids = db.checkpoints.distinct("thread_id")
+            # Run sync distinct() in thread pool to avoid blocking event loop
+            thread_ids = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: db.checkpoints.distinct("thread_id")
+            )
             
             # Batch process - get state for threads in parallel (max 10 concurrent)
-            import asyncio
             semaphore = asyncio.Semaphore(10)
             
             async def get_session_info(thread_id):

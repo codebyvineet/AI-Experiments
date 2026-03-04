@@ -1,4 +1,4 @@
-const API_BASE = 'http://localhost:8000';
+export const API_BASE = 'http://localhost:8000';
 
 export const api = {
   // Auth
@@ -216,8 +216,9 @@ export const api = {
   },
 
   async getMcpCapabilities() {
-    const res = await fetch(`${API_BASE}/mcp/capabilities`);
-    return res.json();
+    const res = await fetch(`${API_BASE}/mcp/health`);
+    const data = await res.json();
+    return data.mcp_server || data;
   },
 
   // Chat Mode (ReAct agent — direct tool calling)
@@ -232,5 +233,13 @@ export const api = {
       },
       body: JSON.stringify({ message })
     });
+  },
+
+  async getChatHistory(token) {
+    const res = await fetch(`${API_BASE}/stream/chat/history`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: Failed to load chat history`);
+    return res.json();
   }
 };

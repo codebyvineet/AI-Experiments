@@ -5,7 +5,7 @@ This module provides:
 - Token blacklist for authentication
 - Session cache for user sessions
 
-Agent checkpointing is handled by LangGraph (see app/agent/checkpointer.py).
+Agent checkpointing uses LangGraph MongoDBSaver (see app/agent/graph.py).
 """
 
 import json
@@ -73,7 +73,7 @@ class RedisConnection:
 
 
 # Global instance - provides Redis connection and auth utilities
-# Note: Agent checkpointing uses LangGraph's AsyncRedisSaver
+# Note: Agent checkpointing uses LangGraph's MongoDBSaver, not Redis
 redis_checkpoint = RedisConnection()
 
 
